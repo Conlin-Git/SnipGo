@@ -141,7 +141,7 @@ SnipGo/
 │       ├── Preferences/    SwiftUI 偏好设置、快捷键录制控件
 │       └── Output/         保存、剪贴板、提示音
 ├── Tests/SnipCoreTests/    拼接、排版、取色单元测试
-└── docs/                   技术方案.md、OCR与翻译方案.md
+└── docs/                   技术方案.md、OCR与翻译方案.md、发版流程.md
 ```
 
 ## 技术要点
@@ -154,7 +154,7 @@ SnipGo/
 - **录屏**：`SCStream` 配合 `SCRecordingOutput` 直接写 mp4，像素尺寸取偶数，帧率 60fps。
 - **全局快捷键**：Carbon `RegisterEventHotKey`，不需要辅助功能权限。
 
-更多设计细节见 [docs/技术方案.md](docs/技术方案.md) 和 [docs/OCR与翻译方案.md](docs/OCR与翻译方案.md)。
+更多设计细节见 [docs/技术方案.md](docs/技术方案.md) 和 [docs/OCR与翻译方案.md](docs/OCR与翻译方案.md)；发新版本按 [docs/发版流程.md](docs/发版流程.md)。
 
 ## 开发
 
