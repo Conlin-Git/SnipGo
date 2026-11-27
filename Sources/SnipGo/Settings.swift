@@ -9,6 +9,7 @@ enum SettingsKey {
     static let recordShowCursor = "recordShowCursor"
     static let filePrefix = "filePrefix"
     static let saveDirectory = "saveDirectory"
+    static let saveDirectoryConfirmed = "saveDirectoryConfirmed"   // 已完成首次保存位置引导
     static let annotationColor = "annotationColor"    // 颜色索引
     static let annotationSize = "annotationSize"      // 0/1/2
     static let hotKeyCapture = "hotKey.capture"

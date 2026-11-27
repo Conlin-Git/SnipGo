@@ -94,6 +94,7 @@ final class PinWindow: NSPanel {
     }
 
     func saveImage() {
+        SaveLocationGuide.runIfNeeded()
         if let url = ImageOutput.save(image) {
             ImageOutput.playCaptureSound()
             NSWorkspace.shared.activateFileViewerSelecting([url])
