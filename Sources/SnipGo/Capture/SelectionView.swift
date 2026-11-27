@@ -81,6 +81,10 @@ final class SelectionView: NSView, NSTextFieldDelegate {
 
     private var toolbar: ToolbarView?
     private var styleBar: StyleBarView?
+    /// 主工具栏下方的文字工具条（提取文字 / 翻译）
+    private var textBar: TextToolBarView?
+    /// 识别 / 翻译结果卡片（内嵌在遮罩里，贴在选区旁）
+    private var textCard: TextResultCard?
     private var pinButton: PinCornerButton?
     /// 录屏模式：底部控制条
     private var recordBar: RecordControlBar?
@@ -157,7 +161,7 @@ final class SelectionView: NSView, NSTextFieldDelegate {
                 ctx.setStrokeColor(NSColor.white.cgColor)
                 ctx.setLineDash(phase: 0, lengths: [6, 4])
             } else {
-                ctx.setStrokeColor(accent.cgColor)
+                ctx.setStrokeColor(NSColor.white.cgColor)   // 截图选区框 / 窗口悬停高亮：白色实线
             }
             ctx.setLineWidth(isSelection ? 1.5 : 2.5)
             // 边框画在选区外侧，避免进入截图 / 录制区域
@@ -190,7 +194,7 @@ final class SelectionView: NSView, NSTextFieldDelegate {
         for h in handleRects(r) {
             ctx.setFillColor(NSColor.white.cgColor)
             ctx.fillEllipse(in: h)
-            ctx.setStrokeColor((mode == .record ? NSColor(white: 0.3, alpha: 1) : accent).cgColor)
+            ctx.setStrokeColor(NSColor(white: 0.3, alpha: 1).cgColor)   // 白底灰边，白色选区框上也看得清
             ctx.setLineWidth(1.5)
             ctx.strokeEllipse(in: h)
         }
@@ -200,14 +204,14 @@ final class SelectionView: NSView, NSTextFieldDelegate {
         let text = "\(Int(sel.width.rounded())) × \(Int(sel.height.rounded())) pt"
         let attrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold),
-            .foregroundColor: NSColor.white,
+            .foregroundColor: mode == .record ? NSColor.white : NSColor(white: 0.1, alpha: 1),
         ]
         let size = (text as NSString).size(withAttributes: attrs)
         var box = CGRect(x: sel.minX, y: sel.maxY + 6, width: size.width + 12, height: size.height + 6)
         if box.maxY > bounds.maxY - 2 { box.origin.y = sel.maxY - box.height - 6; box.origin.x = sel.minX + 6 }
         box.origin.x = min(max(box.minX, bounds.minX + 2), bounds.maxX - box.width - 2)
         box.origin.y = min(max(box.minY, bounds.minY + 2), bounds.maxY - box.height - 2)
-        (mode == .record ? NSColor(white: 0.15, alpha: 0.85) : accent).setFill()
+        (mode == .record ? NSColor(white: 0.15, alpha: 0.85) : NSColor(white: 1, alpha: 0.95)).setFill()   // 截图：白底深色字
         NSBezierPath(roundedRect: box, xRadius: 5, yRadius: 5).fill()
         (text as NSString).draw(at: CGPoint(x: box.minX + 6, y: box.minY + 3), withAttributes: attrs)
     }
@@ -355,10 +359,12 @@ final class SelectionView: NSView, NSTextFieldDelegate {
             hoverRect = r
             NSCursor.crosshair.set()
         } else if let sel = selection {
+            // 鼠标在工具栏、按钮、结果卡片等子视图上时，光标交给子视图（按钮显示手形）
+            if subviews.contains(where: { !$0.isHidden && $0.frame.contains(p) }) { return }
             if tool != nil, sel.contains(p) {
                 (tool == .text ? NSCursor.iBeam : NSCursor.crosshair).set()
-            } else if tool == nil, handleIndex(at: p, in: sel) != nil {
-                NSCursor.crosshair.set()
+            } else if tool == nil, let h = handleIndex(at: p, in: sel) {
+                Self.resizeCursor(forHandle: h).set()
             } else if tool == nil, sel.contains(p) {
                 NSCursor.openHand.set()
             } else {
@@ -409,6 +415,7 @@ final class SelectionView: NSView, NSTextFieldDelegate {
                 return
             }
             if tool == nil, let h = handleIndex(at: p, in: sel) {
+                Self.resizeCursor(forHandle: h).set()
                 drag = .resizing(handle: h, start: p, original: sel)
                 canvas.isAdjusting = true
                 canvas.cursor = p
@@ -508,6 +515,14 @@ final class SelectionView: NSView, NSTextFieldDelegate {
         window?.invalidateCursorRects(for: self)
     }
 
+    /// 选区节点的调整光标：四边为上下 / 左右箭头，四角为斜向箭头
+    /// 节点顺序：0 左下、1 下、2 右下、3 右、4 右上、5 上、6 左上、7 左
+    private static func resizeCursor(forHandle h: Int) -> NSCursor {
+        let positions: [NSCursor.FrameResizePosition] = [.bottomLeft, .bottom, .bottomRight, .right, .topRight, .top, .topLeft, .left]
+        guard positions.indices.contains(h) else { return .crosshair }
+        return .frameResize(position: positions[h], directions: .all)
+    }
+
     private func handleIndex(at p: CGPoint, in sel: CGRect) -> Int? {
         handleRects(sel).firstIndex { $0.insetBy(dx: -4, dy: -4).contains(p) }
     }
@@ -528,8 +543,8 @@ final class SelectionView: NSView, NSTextFieldDelegate {
             return
         }
         switch Int(event.keyCode) {
-        case 53: // Esc
-            delegate?.selectionView(self, perform: .cancel)
+        case 53: // Esc：有结果卡片时先关闭卡片
+            if textCard != nil { closeTextCard() } else { delegate?.selectionView(self, perform: .cancel) }
         case 36, 76: // Enter
             if selection != nil { delegate?.selectionView(self, perform: mode == .record ? .startRecord : .copy) }
         case 123, 124, 125, 126: // 方向键微调
@@ -571,6 +586,15 @@ final class SelectionView: NSView, NSTextFieldDelegate {
             selection = canvas.unionRect
             showBars()
             return true
+        }
+        // 焦点在结果卡片内：⌘C 复制文字，其余（⌘A / ⌘V / ⌘Z 等）交给文本框
+        if let card = textCard, !card.isHidden, card.containsFirstResponder {
+            if event.modifierFlags.intersection([.command, .shift, .option, .control]) == .command,
+               event.charactersIgnoringModifiers?.lowercased() == "c" {
+                card.copyText()
+                return true
+            }
+            return super.performKeyEquivalent(with: event)
         }
         guard !canvas.hasPendingText, event.modifierFlags.contains(.command), selection != nil else {
             return super.performKeyEquivalent(with: event)
@@ -618,6 +642,20 @@ final class SelectionView: NSView, NSTextFieldDelegate {
         pinButton?.isHidden = false
         toolbar?.setActiveTool(tool)
         toolbar?.setUndoEnabled(!annotations.isEmpty)
+        if mode == .screenshot {
+            if textBar == nil {
+                let bar = TextToolBarView(frame: .zero)
+                bar.onCommand = { [weak self] in self?.handle($0) }
+                addSubview(bar)
+                textBar = bar
+            }
+            textBar?.isHidden = false
+        }
+        if let card = textCard {
+            // 选区移动 / 调整后识别结果失效，关闭卡片；只是画了标注则继续显示
+            if card.anchor != sel { closeTextCard() } else { card.isHidden = false }
+        }
+        if textCard != nil { pinButton?.isHidden = true }   // 卡片在选区右侧，钉图按钮会被它挡住
         if let tool {
             if styleBar == nil {
                 let sb = StyleBarView(frame: .zero)
@@ -636,7 +674,40 @@ final class SelectionView: NSView, NSTextFieldDelegate {
     func hideOwnBars() {
         toolbar?.isHidden = true
         styleBar?.isHidden = true
+        textBar?.isHidden = true
         pinButton?.isHidden = true
+        if let card = textCard {
+            if card.anchor != selection { closeTextCard() } else { card.isHidden = true }
+        }
+    }
+
+    // MARK: - 提取文字 / 翻译
+
+    private func showTextCard(translate: Bool) {
+        guard let sel = selection else { return }
+        if let card = textCard, card.anchor == sel {
+            // 同一选区：复用已识别的文字，只切换显示内容
+            if translate { card.model.startTranslation() } else { card.model.showRecognition() }
+        } else {
+            closeTextCard()
+            guard let img = renderResult() else { return }
+            let card = TextResultCard(image: img, anchor: sel, translate: translate)
+            card.onClose = { [weak self] in self?.closeTextCard() }
+            addSubview(card)
+            textCard = card
+        }
+        textBar?.setActive(translate ? .translate : .recognize)
+        updateOwnBars()
+    }
+
+    func closeTextCard() {
+        guard let card = textCard else { return }
+        let hadFocus = card.containsFirstResponder
+        card.removeFromSuperview()
+        textCard = nil
+        textBar?.setActive(nil)
+        if hadFocus || window?.firstResponder == nil || window?.firstResponder === window { window?.makeFirstResponder(self) }
+        if canvas.barOwner === self, selection != nil, !isScrolling { pinButton?.isHidden = false; layoutBars() }
     }
 
     @objc private func pinClicked() {
@@ -647,39 +718,53 @@ final class SelectionView: NSView, NSTextFieldDelegate {
     private func layoutBars() {
         guard let sel = selection, let tb = toolbar else { return }
         let gap: CGFloat = 14
+        let barGap: CGFloat = 8
         let size = tb.frame.size
-        let sb = (styleBar?.isHidden == false) ? styleBar : nil
-        let sbH = sb.map { $0.frame.height + 8 } ?? 0
-        let needed = size.height + sbH + gap
+        // 主工具栏之外的条，按离主工具栏由近到远排列：文字工具条紧贴主工具栏（参考样式），样式行在其后
+        let extras: [NSView] = [textBar, styleBar].compactMap { $0?.isHidden == false ? $0 : nil }
+        let extrasH = extras.reduce(CGFloat(0)) { $0 + $1.frame.height + barGap }
+        let needed = size.height + extrasH + gap
         var y: CGFloat
-        var styleY: CGFloat
+        let stackDown: Bool   // 其他条是否排在主工具栏下方
         if sel.minY - needed >= bounds.minY + 4 {
             // 选区下方
             y = sel.minY - gap - size.height
-            styleY = y - sbH
+            stackDown = true
         } else if sel.maxY + 34 + needed <= bounds.maxY - 4 {
             // 选区上方（让出尺寸标签）
             y = sel.maxY + 34 + gap
-            styleY = y + size.height + 8
+            stackDown = false
         } else {
             // 选区内部底部
-            y = sel.minY + gap + sbH
-            styleY = y - sbH
+            y = sel.minY + gap + extrasH
+            stackDown = true
         }
-        // 跨屏时选区可能超出本屏：工具栏和样式行整体平移，始终留在本屏内
+        var ys: [CGFloat] = []
+        var edge = stackDown ? y : y + size.height
+        for v in extras {
+            if stackDown {
+                edge -= barGap + v.frame.height
+                ys.append(edge)
+            } else {
+                edge += barGap
+                ys.append(edge)
+                edge += v.frame.height
+            }
+        }
+        // 跨屏时选区可能超出本屏：工具栏和其他条整体平移，始终留在本屏内
         var lo = y, hi = y + size.height
-        if let sb { lo = min(lo, styleY); hi = max(hi, styleY + sb.frame.height) }
+        for (v, vy) in zip(extras, ys) { lo = min(lo, vy); hi = max(hi, vy + v.frame.height) }
         var shift: CGFloat = 0
         if hi + shift > bounds.maxY - 4 { shift = bounds.maxY - 4 - hi }
         if lo + shift < bounds.minY + 4 { shift = bounds.minY + 4 - lo }
         y += shift
-        styleY += shift
         // 参考样式：工具栏在选区下方居中
         let x = min(max(sel.midX - size.width / 2, bounds.minX + 6), bounds.maxX - size.width - 6)
         tb.setFrameOrigin(CGPoint(x: x, y: y))
-        if let sb {
-            let sx = min(max(sel.midX - sb.frame.width / 2, bounds.minX + 6), bounds.maxX - sb.frame.width - 6)
-            sb.setFrameOrigin(CGPoint(x: sx, y: styleY))
+        for (v, vy) in zip(extras, ys) {
+            // 文字工具条与主工具栏左对齐；样式行在选区下方居中
+            let vx = v === textBar ? x : min(max(sel.midX - v.frame.width / 2, bounds.minX + 6), bounds.maxX - v.frame.width - 6)
+            v.setFrameOrigin(CGPoint(x: vx, y: vy + shift))
         }
         if let pb = pinButton {
             // 选区右上角外侧；右边放不下时放进选区内的右上角
@@ -690,6 +775,23 @@ final class SelectionView: NSView, NSTextFieldDelegate {
             px = min(max(px, bounds.minX + 4), bounds.maxX - d - 4)
             py = min(max(py, bounds.minY + 4), bounds.maxY - d - 4)
             pb.setFrameOrigin(CGPoint(x: px, y: py))
+        }
+        if let card = textCard, !card.isHidden {
+            // 结果卡片：选区右侧，底边与选区底边对齐；右侧放不下放左侧，都放不下放进选区内右下角
+            let w = card.frame.width, h = card.frame.height, g: CGFloat = 12
+            var cx: CGFloat
+            var cy = sel.minY
+            if sel.maxX + g + w <= bounds.maxX - 6 {
+                cx = sel.maxX + g
+            } else if sel.minX - g - w >= bounds.minX + 6 {
+                cx = sel.minX - g - w
+            } else {
+                cx = sel.maxX - g - w
+                cy = sel.minY + g
+            }
+            cx = min(max(cx, bounds.minX + 6), bounds.maxX - w - 6)
+            cy = min(max(cy, bounds.minY + 6), bounds.maxY - h - 6)
+            card.setFrameOrigin(CGPoint(x: cx, y: cy))
         }
     }
 
@@ -707,6 +809,11 @@ final class SelectionView: NSView, NSTextFieldDelegate {
             AppSettings.annotationSize = i
             styleBar?.refresh(showColors: tool?.usesColor ?? true)
             layoutBars()
+        case .recognizeText, .translate:
+            canvas.commitPendingText()
+            var translate = false
+            if case .translate = command { translate = true }
+            showTextCard(translate: translate)
         default:
             canvas.commitPendingText()
             delegate?.selectionView(self, perform: command)
@@ -845,6 +952,7 @@ final class SelectionView: NSView, NSTextFieldDelegate {
         commitPendingText()
         isScrolling = true
         tool = nil
+        closeTextCard()
         hideOwnBars()
         needsDisplay = true
     }

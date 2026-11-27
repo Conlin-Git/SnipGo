@@ -160,13 +160,6 @@ final class CaptureCoordinator: SelectionViewDelegate {
             startScroll(view)
         case .startRecord:
             startRecording(view)
-        case .recognizeText, .translate:
-            guard let img = view.renderResult(), let sel = view.selection else { return }
-            var translate = false
-            if case .translate = command { translate = true }
-            // 先显示面板再关闭遮罩，焦点留在面板上
-            TextPanelController.show(image: img, anchor: sel, translate: translate)
-            finish()
         default:
             break
         }
