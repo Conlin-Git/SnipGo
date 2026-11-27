@@ -24,6 +24,8 @@ enum AppInfo {
 }
 
 struct AboutView: View {
+    @ObservedObject private var updater = Updater.shared
+
     var body: some View {
         VStack(spacing: 0) {
             Image(nsImage: NSApp.applicationIconImage ?? NSImage())
@@ -38,6 +40,8 @@ struct AboutView: View {
                 .font(.system(size: 13))
                 .foregroundStyle(.secondary)
                 .padding(.top, 4)
+            updateRow
+                .padding(.top, 10)
             Text("macOS 菜单栏截图工具：截图 · 圈图标注 · 马赛克 · 滚动长图 · 钉图 · 录视频")
                 .font(.system(size: 13))
                 .foregroundStyle(.secondary)
@@ -81,6 +85,36 @@ struct AboutView: View {
         .padding(.top, 32)
         .padding(.bottom, 32)
         .frame(width: 640)
+    }
+
+    /// 检查更新按钮与状态
+    private var updateRow: some View {
+        HStack(spacing: 8) {
+            switch updater.state {
+            case .checking:
+                ProgressView().controlSize(.small)
+                Text("正在检查更新…").foregroundStyle(.secondary)
+            case .downloading(let p):
+                ProgressView(value: p).frame(width: 140)
+                Text("正在下载 \(Int(p * 100))%").foregroundStyle(.secondary).monospacedDigit()
+            case .installing:
+                ProgressView().controlSize(.small)
+                Text("正在安装，完成后自动重新打开…").foregroundStyle(.secondary)
+            case .available(let r):
+                Text("发现新版本 \(r.version)").foregroundStyle(.secondary)
+                Button("立即更新") { updater.download(r) }
+            case .upToDate:
+                Text("已是最新版本").foregroundStyle(.secondary)
+                Button("检查更新") { updater.check() }
+            case .failed(let message):
+                Text(message).foregroundStyle(.red).lineLimit(2).frame(maxWidth: 360)
+                Button("重试") { updater.check() }
+            case .idle:
+                Button("检查更新") { updater.check() }
+            }
+        }
+        .font(.system(size: 13))
+        .frame(minHeight: 24)
     }
 
     @ViewBuilder
