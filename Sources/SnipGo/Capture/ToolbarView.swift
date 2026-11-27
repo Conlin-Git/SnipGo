@@ -40,6 +40,63 @@ enum ToolbarStyle {
     static let active = NSColor(srgbRed: 0.33, green: 0.62, blue: 1, alpha: 1)
     static let cancel = NSColor(srgbRed: 1, green: 0.2, blue: 0.2, alpha: 1)
     static let buttonSize = NSSize(width: 40, height: 40)
+    static let hover = NSColor(white: 1, alpha: 0.1)
+    static let selected = NSColor(white: 1, alpha: 0.14)
+}
+
+/// 带悬停样式的按钮：鼠标移入时显示浅色背景，光标变为手形；isActive 时保持选中背景
+class HoverButton: NSButton {
+    /// 常态背景（nil 为透明）
+    var baseColor: NSColor? { didSet { refreshBackground() } }
+    var hoverColor = ToolbarStyle.hover { didSet { refreshBackground() } }
+    var activeColor = ToolbarStyle.selected
+    var isActive = false { didSet { refreshBackground() } }
+    private var hovering = false
+
+    override var isEnabled: Bool {
+        didSet {
+            if !isEnabled { hovering = false }
+            refreshBackground()
+            window?.invalidateCursorRects(for: self)
+        }
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                                       owner: self, userInfo: nil))
+    }
+
+    override func resetCursorRects() {
+        if isEnabled { addCursorRect(bounds, cursor: .pointingHand) }
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        guard isEnabled else { return }
+        hovering = true
+        refreshBackground()
+        NSCursor.pointingHand.set()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        guard hovering else { return }
+        hovering = false
+        refreshBackground()
+        NSCursor.arrow.set()
+    }
+
+    override func viewDidHide() {
+        super.viewDidHide()
+        hovering = false
+        refreshBackground()
+    }
+
+    func refreshBackground() {
+        wantsLayer = true
+        let color = isActive ? activeColor : (hovering && isEnabled ? hoverColor : baseColor)
+        layer?.backgroundColor = color?.cgColor
+    }
 }
 
 /// 主工具栏
@@ -49,7 +106,7 @@ final class ToolbarView: HUDBackgroundView {
     private let kind: ToolbarKind
     private let stack = NSStackView()
     private var commands: [ToolbarCommand] = []
-    private var toolButtons: [AnnotationTool: NSButton] = [:]
+    private var toolButtons: [AnnotationTool: HoverButton] = [:]
     private var undoButton: NSButton?
 
     init(kind: ToolbarKind) {
@@ -96,15 +153,13 @@ final class ToolbarView: HUDBackgroundView {
             separator()
             add(symbol: "xmark", tip: "取消 Esc", command: .cancel, tint: ToolbarStyle.cancel, weight: .medium, size: 21)
             add(symbol: "rectangle.expand.vertical", tip: "长截图（滚动截图）", command: .scroll)
-            add(symbol: "text.viewfinder", tip: "识别文字", command: .recognizeText)
-            add(symbol: "character.bubble", tip: "翻译", command: .translate)
             add(symbol: "tray.and.arrow.down", tip: "保存 ⌘S", command: .save)
             add(symbol: "doc.on.doc", tip: "复制到剪贴板 ↩ / ⌘C", command: .copy)
         }
     }
 
-    private func makeButton(tip: String, command: ToolbarCommand) -> NSButton {
-        let b = NSButton(title: "", target: self, action: #selector(clicked(_:)))
+    private func makeButton(tip: String, command: ToolbarCommand) -> HoverButton {
+        let b = HoverButton(title: "", target: self, action: #selector(clicked(_:)))
         b.isBordered = false
         b.toolTip = tip
         b.tag = commands.count
@@ -120,7 +175,7 @@ final class ToolbarView: HUDBackgroundView {
 
     @discardableResult
     private func add(symbol: String, tip: String, command: ToolbarCommand, tint: NSColor = ToolbarStyle.icon,
-                     weight: NSFont.Weight = .regular, size: CGFloat = 19) -> NSButton {
+                     weight: NSFont.Weight = .regular, size: CGFloat = 19) -> HoverButton {
         let b = makeButton(tip: tip, command: command)
         if let img = symbolImage(symbol, size: size, weight: weight) {
             b.image = img
@@ -134,7 +189,7 @@ final class ToolbarView: HUDBackgroundView {
 
     /// 文字工具：参考样式用一个细体的大写 A
     @discardableResult
-    private func add(text: String, tip: String, command: ToolbarCommand) -> NSButton {
+    private func add(text: String, tip: String, command: ToolbarCommand) -> HoverButton {
         let b = makeButton(tip: tip, command: command)
         setTextTitle(b, text, color: ToolbarStyle.icon)
         return b
@@ -166,7 +221,7 @@ final class ToolbarView: HUDBackgroundView {
     func setActiveTool(_ tool: AnnotationTool?) {
         for (t, b) in toolButtons {
             let on = t == tool
-            b.layer?.backgroundColor = on ? NSColor(white: 1, alpha: 0.1).cgColor : nil
+            b.isActive = on
             let color = on ? ToolbarStyle.active : ToolbarStyle.icon
             if t == .text { setTextTitle(b, "A", color: color) } else { b.contentTintColor = color }
         }
@@ -178,8 +233,84 @@ final class ToolbarView: HUDBackgroundView {
     }
 }
 
+/// 主工具栏下方的文字工具条：提取文字、翻译（带文字标签，结果显示在选区旁的卡片里）
+final class TextToolBarView: HUDBackgroundView {
+    enum Item { case recognize, translate }
+
+    var onCommand: ((ToolbarCommand) -> Void)?
+    private let stack = NSStackView()
+    private var buttons: [Item: HoverButton] = [:]
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        layer?.backgroundColor = ToolbarStyle.background.cgColor
+        layer?.borderColor = ToolbarStyle.border.cgColor
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 4
+        stack.edgeInsets = NSEdgeInsets(top: 4, left: 10, bottom: 4, right: 10)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            stack.topAnchor.constraint(equalTo: topAnchor),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+        buttons[.recognize] = add(symbol: "text.viewfinder", title: "提取文字", item: .recognize)
+        buttons[.translate] = add(symbol: "character.bubble", title: "翻译", item: .translate)
+        layoutSubtreeIfNeeded()
+        setFrameSize(stack.fittingSize)
+        setActive(nil)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    /// 与主工具栏一致的胶囊形：初始化时 fittingSize 可能还没算出来，尺寸变化时再更新圆角
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        layer?.cornerRadius = newSize.height / 2
+    }
+
+    private func add(symbol: String, title: String, item: Item) -> HoverButton {
+        let b = HoverButton(title: title, target: self, action: #selector(clicked(_:)))
+        b.isBordered = false
+        b.tag = item == .recognize ? 0 : 1
+        b.image = symbolImage(symbol, size: 16)
+        b.imagePosition = .imageLeading
+        b.imageHugsTitle = true
+        b.wantsLayer = true
+        b.layer?.cornerRadius = 8
+        b.attributedTitle = NSAttributedString(string: title, attributes: [
+            .font: NSFont.systemFont(ofSize: 14, weight: .medium), .foregroundColor: ToolbarStyle.icon,
+        ])
+        b.translatesAutoresizingMaskIntoConstraints = false
+        b.heightAnchor.constraint(equalToConstant: 32).isActive = true
+        b.widthAnchor.constraint(equalToConstant: b.intrinsicContentSize.width + 20).isActive = true
+        stack.addArrangedSubview(b)
+        return b
+    }
+
+    @objc private func clicked(_ sender: NSButton) {
+        onCommand?(sender.tag == 0 ? .recognizeText : .translate)
+    }
+
+    /// 高亮当前结果卡片对应的按钮
+    func setActive(_ item: Item?) {
+        for (i, b) in buttons {
+            let on = i == item
+            let color = on ? ToolbarStyle.active : ToolbarStyle.icon
+            b.isActive = on
+            b.contentTintColor = color
+            b.attributedTitle = NSAttributedString(string: b.title, attributes: [
+                .font: NSFont.systemFont(ofSize: 14, weight: .medium), .foregroundColor: color,
+            ])
+        }
+    }
+}
+
 /// 选区右上角外侧的圆形钉图按钮
-final class PinCornerButton: NSButton {
+final class PinCornerButton: HoverButton {
     static let diameter: CGFloat = 32
 
     init(target: AnyObject, action: Selector) {
@@ -191,7 +322,8 @@ final class PinCornerButton: NSButton {
         toolTip = "钉在桌面"
         wantsLayer = true
         layer?.cornerRadius = Self.diameter / 2
-        layer?.backgroundColor = NSColor(white: 0.22, alpha: 0.88).cgColor
+        baseColor = NSColor(white: 0.22, alpha: 0.88)
+        hoverColor = NSColor(white: 0.34, alpha: 0.92)
         layer?.borderColor = NSColor(white: 1, alpha: 0.12).cgColor
         layer?.borderWidth = 0.5
         image = symbolImage("pin.fill", size: 15, weight: .medium)
@@ -281,7 +413,7 @@ final class StyleBarView: HUDBackgroundView {
     @objc private func colorClicked(_ b: NSButton) { onCommand?(.color(b.tag)) }
 }
 
-final class SwatchButton: NSButton {
+final class SwatchButton: HoverButton {
     enum Kind {
         case size(CGFloat)
         case color(NSColor)
@@ -298,6 +430,8 @@ final class SwatchButton: NSButton {
         self.action = action
         isBordered = false
         title = ""
+        wantsLayer = true
+        layer?.cornerRadius = 6
         translatesAutoresizingMaskIntoConstraints = false
         widthAnchor.constraint(equalToConstant: 24).isActive = true
         heightAnchor.constraint(equalToConstant: 24).isActive = true

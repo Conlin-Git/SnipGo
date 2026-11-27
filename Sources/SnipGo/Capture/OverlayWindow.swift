@@ -17,6 +17,20 @@ final class OverlayWindow: NSWindow {
 
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
+
+    /// 焦点在结果卡片的文本框里时，Esc 关闭卡片（文本框自己会把 Esc 当作补全，输入法组字时除外）
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .keyDown, event.keyCode == 53,
+           event.modifierFlags.intersection([.command, .shift, .option, .control]).isEmpty,
+           var v = firstResponder as? NSView {
+            while !(v is TextResultCard), let parent = v.superview { v = parent }
+            if let card = v as? TextResultCard, !card.hasMarkedText {
+                card.onClose?()
+                return
+            }
+        }
+        super.sendEvent(event)
+    }
 }
 
 /// 浮在遮罩之上的面板（长图 HUD、预览、录制 HUD 等）

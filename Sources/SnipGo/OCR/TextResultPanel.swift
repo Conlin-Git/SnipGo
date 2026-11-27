@@ -59,10 +59,8 @@ final class TextPanelModel: ObservableObject {
     @Published private(set) var target: String
     @Published private(set) var targetOptions: [String] = TranslateLanguages.common
     @Published var config: TranslationSession.Configuration?
-    @Published private(set) var lastTranslatedSource: String?
     @Published private(set) var hint: String?
 
-    var onModeChange: ((Mode) -> Void)?
     private var userPickedTarget = false
     private var hintTask: Task<Void, Never>?
 
@@ -74,7 +72,6 @@ final class TextPanelModel: ObservableObject {
     }
 
     var hasText: Bool { !sourceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-    var canRetranslate: Bool { hasText && !isTranslating && sourceText != lastTranslatedSource }
 
     private func recognize(_ image: CGImage) async {
         do {
@@ -102,10 +99,7 @@ final class TextPanelModel: ObservableObject {
 
     func startTranslation() {
         guard !isRecognizing, hasText else { return }
-        if mode != .translate {
-            mode = .translate
-            onModeChange?(.translate)
-        }
+        mode = .translate
         // 原文可能被编辑过，重新判断语言
         let source = TranslateLanguages.normalizedID(TextRecognizer.dominantLanguage(of: sourceText))
         sourceLanguage = source
@@ -144,12 +138,16 @@ final class TextPanelModel: ObservableObject {
             let responses = try await session.translations(from: requests)
             let ordered = responses.sorted { Int($0.clientIdentifier ?? "") ?? 0 < Int($1.clientIdentifier ?? "") ?? 0 }
             translatedText = ordered.map(\.targetText).joined(separator: "\n\n")
-            lastTranslatedSource = text
         } catch {
             translatedText = ""
             translateError = "翻译失败：\(error.localizedDescription)"
         }
         isTranslating = false
+    }
+
+    /// 切回识别结果（复用已识别的文字，不重新识别）
+    func showRecognition() {
+        mode = .recognize
     }
 
     func setTarget(_ id: String) {
@@ -186,52 +184,73 @@ final class TextPanelModel: ObservableObject {
 
 // MARK: - 视图
 
-struct TextPanelView: View {
+/// 内嵌在截图遮罩里、贴在选区旁边的结果卡片（参考样式：白色圆角卡片，标题 + 关闭，正文，底部蓝色「复制」）
+struct TextCardView: View {
     @ObservedObject var model: TextPanelModel
     let onClose: () -> Void
+    /// 正在选择目标语言：卡片内显示语言列表（遮罩窗口层级很高，系统弹出菜单可能被挡住，所以不用 Picker）
+    @State private var pickingLanguage = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            if model.mode == .recognize {
-                header(title: "识别结果", trailing: model.sourceLanguage.map { "语言：\(TranslateLanguages.displayName($0))" })
-                sourceEditor
-            } else {
-                HStack(alignment: .top, spacing: 12) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        header(title: "原文", trailing: model.sourceLanguage.map(TranslateLanguages.displayName))
-                        sourceEditor
-                    }
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Text("译文").font(.headline)
-                            Spacer()
-                            Picker("目标语言", selection: Binding(get: { model.target }, set: { model.setTarget($0) })) {
-                                ForEach(model.targetOptions, id: \.self) { Text(TranslateLanguages.displayName($0)).tag($0) }
-                            }
-                            .labelsHidden()
-                            .frame(width: 130)
-                        }
-                        .frame(height: 22)
-                        translationEditor
-                    }
+        VStack(alignment: .leading, spacing: 12) {
+            header
+            Group {
+                if pickingLanguage {
+                    languageList
+                } else if model.mode == .recognize {
+                    sourceEditor
+                } else {
+                    translationEditor
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             footer
         }
-        .padding(14)
-        .frame(minWidth: 360, minHeight: 220)
+        .padding(EdgeInsets(top: 16, leading: 20, bottom: 16, trailing: 16))
+        .frame(width: TextResultCard.size.width, height: TextResultCard.size.height)
+        .background(RoundedRectangle(cornerRadius: 14).fill(Color(nsColor: .windowBackgroundColor)))
+        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .onChange(of: model.mode) { pickingLanguage = false }
         .translationTask(model.config) { session in
             await model.translate(using: session)
         }
     }
 
-    private func header(title: String, trailing: String?) -> some View {
-        HStack {
-            Text(title).font(.headline)
+    private var header: some View {
+        HStack(spacing: 8) {
+            if model.mode == .recognize {
+                Text("识别结果").font(.system(size: 16, weight: .semibold))
+            } else {
+                Text("翻译为").font(.system(size: 16)).foregroundStyle(.secondary)
+                Button { pickingLanguage.toggle() } label: {
+                    HStack(spacing: 4) {
+                        Text(TranslateLanguages.displayName(model.target)).font(.system(size: 16, weight: .semibold))
+                        Image(systemName: pickingLanguage ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 6)
+                    .frame(height: 26)
+                    .contentShape(Rectangle())
+                    .hoverHighlight()
+                }
+                .buttonStyle(.plain)
+                .padding(.leading, -6)
+                .help("切换目标语言")
+            }
             Spacer()
-            if let trailing { Text(trailing).font(.callout).foregroundStyle(.secondary) }
+            Button(action: onClose) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 24, height: 24)
+                    .contentShape(Rectangle())
+                    .hoverHighlight()
+            }
+            .buttonStyle(.plain)
+            .help("关闭 Esc")
         }
-        .frame(height: 22)
+        .frame(height: 24)
     }
 
     private var sourceEditor: some View {
@@ -252,19 +271,47 @@ struct TextPanelView: View {
             .overlay {
                 if model.isRecognizing || model.isTranslating {
                     ProgressView("正在翻译…").controlSize(.small)
-                } else if let err = model.translateError {
+                } else if let err = model.recognizeError ?? model.translateError {
                     placeholder(err)
+                } else if !model.hasText {
+                    placeholder("未识别到文字")
                 }
             }
     }
 
     private func editor(text: Binding<String>) -> some View {
         TextEditor(text: text)
-            .font(.system(size: 13))
+            .font(.system(size: 14))
+            .lineSpacing(3)
             .scrollContentBackground(.hidden)
-            .padding(6)
-            .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .textBackgroundColor)))
-            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color(nsColor: .separatorColor)))
+            .padding(.leading, -5)   // 抵消 NSTextView 的内边距，让文字与标题左对齐
+    }
+
+    private var languageList: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 2) {
+                ForEach(model.targetOptions, id: \.self) { id in
+                    Button {
+                        pickingLanguage = false
+                        model.setTarget(id)
+                    } label: {
+                        HStack {
+                            Text(TranslateLanguages.displayName(id)).font(.system(size: 14))
+                            Spacer()
+                            if id == model.target {
+                                Image(systemName: "checkmark").font(.system(size: 12, weight: .semibold)).foregroundStyle(Color.accentColor)
+                            }
+                        }
+                        .padding(.horizontal, 8)
+                        .frame(height: 28)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(id == model.target ? Color.accentColor.opacity(0.1) : .clear))
+                        .contentShape(Rectangle())
+                        .hoverHighlight()
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
     }
 
     private func placeholder(_ text: String) -> some View {
@@ -277,138 +324,115 @@ struct TextPanelView: View {
     }
 
     private var footer: some View {
-        HStack(spacing: 8) {
+        let canCopy = model.mode == .recognize ? model.hasText : !model.translatedText.isEmpty
+        return HStack {
             if let hint = model.hint {
-                Label(hint, systemImage: "checkmark.circle.fill").foregroundStyle(.green).font(.callout)
+                Label(hint, systemImage: "checkmark.circle.fill").font(.system(size: 12)).foregroundStyle(.green)
+            } else {
+                Text(model.mode == .recognize ? "系统离线识别" : "系统离线翻译").font(.system(size: 12)).foregroundStyle(.tertiary)
             }
             Spacer()
-            if model.mode == .recognize {
-                Button("翻译") { model.startTranslation() }
-                    .disabled(model.isRecognizing || !model.hasText)
-                Button("复制") { model.copy(model.sourceText, hint: "已复制") }
-                    .disabled(!model.hasText)
-            } else {
-                Button("重新翻译") { model.startTranslation() }
-                    .disabled(!model.canRetranslate)
-                Button("复制原文") { model.copy(model.sourceText, hint: "已复制原文") }
-                    .disabled(!model.hasText)
-                Button("复制译文") { model.copy(model.translatedText, hint: "已复制译文") }
-                    .disabled(model.translatedText.isEmpty)
+            Button { model.copyPrimary() } label: {
+                CopyButtonLabel(enabled: canCopy)
             }
-            Button("关闭", action: onClose)
+            .buttonStyle(.plain)
+            .disabled(!canCopy)
+            .opacity(canCopy ? 1 : 0.4)
+            .help(model.mode == .recognize ? "复制识别结果" : "复制译文")
         }
     }
 }
 
-// MARK: - 窗口
+// MARK: - 容器
 
-/// 识别 / 翻译结果面板：Esc 或 ⌘W 关闭；没有选中文字时 ⌘C 复制全部
-final class TextPanel: NSPanel {
-    var onCopyAll: (() -> Void)?
-
-    override func sendEvent(_ event: NSEvent) {
-        if event.type == .keyDown {
-            let mods = event.modifierFlags.intersection([.command, .shift, .option, .control])
-            let chars = event.charactersIgnoringModifiers?.lowercased()
-            let textView = firstResponder as? NSTextView
-            if event.keyCode == 53, mods.isEmpty, textView?.hasMarkedText() != true {   // Esc（输入法组字时除外）
-                performClose(nil)
-                return
-            }
-            if mods == .command, chars == "w" {
-                performClose(nil)
-                return
-            }
-            if mods == .command, chars == "c", textView.map({ $0.selectedRange().length == 0 }) ?? true {
-                onCopyAll?()
-                return
-            }
-        }
-        super.sendEvent(event)
-    }
-}
-
+/// 截图遮罩中的结果卡片容器：作为 SelectionView 的子视图显示，不单独弹出窗口
 @MainActor
-final class TextPanelController: NSObject, NSWindowDelegate {
-    private static var openPanels: [TextPanelController] = []
+final class TextResultCard: NSView {
+    static let size = NSSize(width: 320, height: 360)
 
-    static let recognizeSize = NSSize(width: 440, height: 320)
-    static let translateSize = NSSize(width: 760, height: 400)
+    let model: TextPanelModel
+    /// 卡片对应的选区（全局坐标）；选区变化后结果失效，卡片随之关闭
+    let anchor: CGRect
+    var onClose: (() -> Void)?
 
-    private let panel: TextPanel
-    private let model: TextPanelModel
-
-    /// anchor：选区在全局坐标中的位置，用于把面板放在选区附近
-    static func show(image: CGImage, anchor: NSRect, translate: Bool) {
-        let c = TextPanelController(image: image, anchor: anchor, translate: translate)
-        openPanels.append(c)
-        NSApp.activate(ignoringOtherApps: true)
-        c.panel.makeKeyAndOrderFront(nil)
-    }
-
-    private init(image: CGImage, anchor: NSRect, translate: Bool) {
+    init(image: CGImage, anchor: CGRect, translate: Bool) {
         model = TextPanelModel(image: image, translate: translate)
-        let size = translate ? Self.translateSize : Self.recognizeSize
-        panel = TextPanel(contentRect: NSRect(origin: .zero, size: size),
-                          styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
-        super.init()
-        panel.title = translate ? "翻译" : "识别文字"
-        panel.level = .floating
-        panel.hidesOnDeactivate = false
-        panel.isReleasedWhenClosed = false
-        panel.minSize = NSSize(width: 360, height: 240)
-        panel.delegate = self
-        panel.contentView = NSHostingView(rootView: TextPanelView(model: model) { [weak self] in self?.panel.performClose(nil) })
-        panel.onCopyAll = { [weak self] in self?.model.copyPrimary() }
-        panel.setFrame(Self.frame(size: size, near: anchor), display: false)
-
-        model.onModeChange = { [weak self] mode in
-            guard let self, mode == .translate else { return }
-            self.panel.title = "翻译"
-            self.growToTranslateSize()
-        }
+        self.anchor = anchor
+        super.init(frame: NSRect(origin: .zero, size: Self.size))
+        wantsLayer = true
+        layer?.shadowColor = NSColor.black.cgColor
+        layer?.shadowOpacity = 0.25
+        layer?.shadowRadius = 12
+        layer?.shadowOffset = CGSize(width: 0, height: -3)
+        let host = NSHostingView(rootView: TextCardView(model: model) { [weak self] in self?.onClose?() })
+        host.frame = bounds
+        host.autoresizingMask = [.width, .height]
+        addSubview(host)
     }
 
-    private static func frame(size: NSSize, near anchor: NSRect) -> NSRect {
-        let center = NSPoint(x: anchor.midX, y: anchor.midY)
-        let screen = NSScreen.screens.first { $0.frame.contains(center) } ?? NSScreen.main
-        let visible = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        let gap: CGFloat = 12
-        var y: CGFloat
-        if anchor.minY - gap - size.height >= visible.minY {
-            y = anchor.minY - gap - size.height          // 选区下方
-        } else if anchor.maxY + gap + size.height <= visible.maxY {
-            y = anchor.maxY + gap                        // 选区上方
+    required init?(coder: NSCoder) { fatalError() }
+
+    /// 键盘焦点是否在卡片内（正在编辑 / 选择文字）
+    var containsFirstResponder: Bool {
+        guard let v = window?.firstResponder as? NSView else { return false }
+        return v.isDescendant(of: self)
+    }
+
+    /// 卡片内的文本框处于输入法组字状态
+    var hasMarkedText: Bool {
+        (window?.firstResponder as? NSTextView).map { $0.isDescendant(of: self) && $0.hasMarkedText() } ?? false
+    }
+
+    /// ⌘C：有选中文字时复制选中部分，否则复制当前主要内容（识别结果 / 译文）
+    func copyText() {
+        if let tv = window?.firstResponder as? NSTextView, tv.isDescendant(of: self), tv.selectedRange().length > 0 {
+            tv.copy(nil)
         } else {
-            y = visible.midY - size.height / 2           // 都放不下：屏幕中间
+            model.copyPrimary()
         }
-        var x = anchor.midX - size.width / 2
-        x = min(max(x, visible.minX + 8), visible.maxX - size.width - 8)
-        y = min(max(y, visible.minY + 8), visible.maxY - size.height - 8)
-        return NSRect(origin: NSPoint(x: x, y: y), size: size)
     }
+}
 
-    /// 切到翻译模式时加宽，保持左上角不动并限制在屏幕内
-    private func growToTranslateSize() {
-        var f = panel.frame
-        let top = f.maxY
-        f.size.width = max(f.width, Self.translateSize.width)
-        f.size.height = max(f.height, Self.translateSize.height)
-        f.origin.y = top - f.height
-        if let visible = panel.screen?.visibleFrame {
-            f.origin.x = min(max(f.minX, visible.minX + 8), visible.maxX - f.width - 8)
-            f.origin.y = min(max(f.minY, visible.minY + 8), visible.maxY - f.height - 8)
-        }
-        panel.setFrame(f, display: true, animate: true)
+// MARK: - 悬停样式
+
+/// 卡片内按钮的悬停样式：浅色背景 + 手形光标
+private struct HoverHighlight: ViewModifier {
+    var cornerRadius: CGFloat
+    @State private var hovering = false
+
+    func body(content: Content) -> some View {
+        content
+            .background(RoundedRectangle(cornerRadius: cornerRadius).fill(Color.primary.opacity(hovering ? 0.08 : 0)))
+            .onHover { inside in
+                hovering = inside
+                (inside ? NSCursor.pointingHand : NSCursor.arrow).set()
+            }
     }
+}
 
-    func windowWillClose(_ notification: Notification) {
-        Self.openPanels.removeAll { $0 === self }
-        // 没有其他需要焦点的窗口时把焦点还给之前的应用
-        let others = NSApp.windows.contains {
-            $0 !== panel && $0.isVisible && $0.canBecomeKey && $0.className != "NSStatusBarWindow"
-                && !($0 is OverlayWindow) && !($0 is FloatingPanel) && !($0 is PinWindow)
-        }
-        if !others && !CaptureCoordinator.shared.isActive { NSApp.deactivate() }
+private extension View {
+    func hoverHighlight(cornerRadius: CGFloat = 6) -> some View {
+        modifier(HoverHighlight(cornerRadius: cornerRadius))
+    }
+}
+
+/// 蓝色「复制」按钮：悬停时加深并显示手形光标
+private struct CopyButtonLabel: View {
+    let enabled: Bool
+    @State private var hovering = false
+
+    var body: some View {
+        Text("复制")
+            .font(.system(size: 14, weight: .medium))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 20)
+            .frame(height: 32)
+            .background(Capsule().fill(Color.accentColor))
+            .overlay(Capsule().fill(Color.black.opacity(enabled && hovering ? 0.15 : 0)))
+            .contentShape(Capsule())
+            .onHover { inside in
+                hovering = inside
+                (inside && enabled ? NSCursor.pointingHand : NSCursor.arrow).set()
+            }
     }
 }
