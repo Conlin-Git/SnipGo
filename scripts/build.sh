@@ -45,7 +45,13 @@ if [[ "${1:-}" == "--install" ]]; then
   echo "==> 安装到 /Applications"
   rm -rf "/Applications/$APP_NAME.app"
   cp -R "$APP" "/Applications/$APP_NAME.app"
-  echo "    /Applications/$APP_NAME.app"
+  # 删除 build 里的副本并从 LaunchServices 注销，避免启动台 / Spotlight 出现两个 SnipGo
+  LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+  rm -rf "$APP"
+  "$LSREGISTER" -u "$APP" >/dev/null 2>&1 || true
+  "$LSREGISTER" -f "/Applications/$APP_NAME.app" >/dev/null 2>&1 || true
+  echo "完成: /Applications/$APP_NAME.app（已移除 build 中的副本）"
+  exit 0
 fi
 
 echo "完成: $APP"
