@@ -26,7 +26,7 @@
 | 📜 **滚动长图** | 选区后手动滚动页面，自动拼接；能识别吸顶导航和吸底栏，右侧实时预览 |
 | 📌 **钉图** | 把截图钉在桌面最上层（全屏应用里也能看到），可拖动，滚轮或触控板捏合缩放 |
 | 🎬 **录视频** | QuickTime 风格的底部控制条，录整个屏幕或所选部分，输出 mp4（H.264），可录系统声音和麦克风 |
-| ⚙️ **偏好设置** | 开机自启、提示音、jpg/png、自定义快捷键、文件名前缀、保存位置 |
+| ⚙️ **偏好设置** | 开机自启、提示音、jpg/png、自定义快捷键、文件名前缀、保存位置；「关于」页含版本与项目信息 |
 
 ## 安装
 
@@ -35,7 +35,7 @@
 ```bash
 git clone https://github.com/Conlin-Git/SnipGo.git
 cd SnipGo
-./scripts/build.sh --install   # 编译并安装到 /Applications
+./scripts/build.sh --install   # 编译并安装到 /Applications（会删除 build 中的副本）
 open /Applications/SnipGo.app
 ```
 

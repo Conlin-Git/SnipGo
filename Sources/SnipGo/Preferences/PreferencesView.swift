@@ -141,12 +141,29 @@ final class PreferencesWindowController: NSWindowController {
     static let shared = PreferencesWindowController()
 
     private init() {
-        let hosting = NSHostingController(rootView: PreferencesView())
-        let window = NSWindow(contentViewController: hosting)
+        // 参考样式：窗口顶部工具栏式标签页（通用 / 关于）
+        let tabs = NSTabViewController()
+        tabs.tabStyle = .toolbar
+        tabs.transitionOptions = [.allowUserInteraction]
+        tabs.addTabViewItem(Self.tab(PreferencesView(), label: "通用", symbol: "gearshape"))
+        tabs.addTabViewItem(Self.tab(AboutView(), label: "关于", symbol: "info.circle"))
+
+        let window = NSWindow(contentViewController: tabs)
         window.title = "偏好设置"
         window.styleMask = [.titled, .closable]
+        window.toolbarStyle = .preference
         window.isReleasedWhenClosed = false
         super.init(window: window)
+    }
+
+    private static func tab<V: View>(_ view: V, label: String, symbol: String) -> NSTabViewItem {
+        let hosting = NSHostingController(rootView: view)
+        hosting.sizingOptions = [.preferredContentSize]
+        hosting.title = label
+        let item = NSTabViewItem(viewController: hosting)
+        item.label = label
+        item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)
+        return item
     }
 
     required init?(coder: NSCoder) { fatalError() }
