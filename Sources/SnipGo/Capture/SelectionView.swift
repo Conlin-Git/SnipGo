@@ -1,4 +1,5 @@
 import AppKit
+import SnipCore
 
 @MainActor
 protocol SelectionViewDelegate: AnyObject {
@@ -11,15 +12,16 @@ protocol SelectionViewDelegate: AnyObject {
 final class OverlayContentView: NSView {
     let selectionView: SelectionView
 
-    init(snapshot: ScreenSnapshot, mode: CaptureMode) {
-        selectionView = SelectionView(snapshot: snapshot, mode: mode)
+    init(snapshot: ScreenSnapshot, canvas: CaptureCanvas) {
+        selectionView = SelectionView(snapshot: snapshot, canvas: canvas)
         super.init(frame: NSRect(origin: .zero, size: snapshot.screen.frame.size))
         wantsLayer = true
         layer?.contents = snapshot.image
         layer?.contentsGravity = .resize
         layer?.magnificationFilter = .nearest
         selectionView.frame = bounds
-        selectionView.autoresizingMask = [.width, .height]
+        // 选区视图的坐标系 = 全局坐标：所有屏幕共用同一套选区 / 标注坐标，选区可以跨屏
+        selectionView.setBoundsOrigin(snapshot.screen.frame.origin)
         addSubview(selectionView)
     }
 
@@ -30,21 +32,39 @@ final class OverlayContentView: NSView {
     }
 }
 
+/// 单块屏幕上的选区视图。选区、标注、当前工具等状态保存在共享的 CaptureCanvas 中，
+/// 本视图的 bounds 即该屏幕的全局矩形。
 final class SelectionView: NSView, NSTextFieldDelegate {
     weak var delegate: SelectionViewDelegate?
 
     let snapshot: ScreenSnapshot
-    let mode: CaptureMode
+    let canvas: CaptureCanvas
+    var mode: CaptureMode { canvas.mode }
 
-    private(set) var selection: CGRect?
-    private var hoverRect: CGRect?
-    /// 另一块屏幕已开始选区，本屏只显示遮罩
+    private(set) var selection: CGRect? {
+        get { canvas.selection }
+        set { canvas.selection = newValue }
+    }
+    private var hoverRect: CGRect? {
+        get { canvas.hoverRect }
+        set { canvas.hoverRect = newValue }
+    }
+    private var tool: AnnotationTool? {
+        get { canvas.tool }
+        set { canvas.tool = newValue }
+    }
+    private(set) var annotations: [Annotation] {
+        get { canvas.annotations }
+        set { canvas.annotations = newValue }
+    }
+    private var current: Annotation? {
+        get { canvas.current }
+        set { canvas.current = newValue }
+    }
+
+    /// 录屏模式下另一块屏幕已开始选区，本屏只显示遮罩
     var isPassive = false { didSet { hoverRect = nil; needsDisplay = true } }
     private(set) var isScrolling = false
-
-    private var tool: AnnotationTool?
-    private(set) var annotations: [Annotation] = []
-    private var current: Annotation?
     private var mosaicImage: CGImage?
 
     private enum Drag {
@@ -57,6 +77,7 @@ final class SelectionView: NSView, NSTextFieldDelegate {
 
     private var drag: Drag = .none
     private var didDrag = false
+    private var shiftDown = false
 
     private var toolbar: ToolbarView?
     private var styleBar: StyleBarView?
@@ -69,10 +90,11 @@ final class SelectionView: NSView, NSTextFieldDelegate {
 
     private let accent = NSColor(srgbRed: 0.16, green: 0.5, blue: 1, alpha: 1)
 
-    init(snapshot: ScreenSnapshot, mode: CaptureMode) {
+    init(snapshot: ScreenSnapshot, canvas: CaptureCanvas) {
         self.snapshot = snapshot
-        self.mode = mode
+        self.canvas = canvas
         super.init(frame: .zero)
+        canvas.add(self)
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -88,8 +110,22 @@ final class SelectionView: NSView, NSTextFieldDelegate {
                                        owner: self, userInfo: nil))
     }
 
-    private var pixelScale: CGFloat {
+    var pixelScale: CGFloat {
         bounds.width > 0 ? CGFloat(snapshot.image.width) / bounds.width : snapshot.screen.backingScaleFactor
+    }
+
+    /// 选区可移动 / 调整的范围：截图可跨屏；录屏只能在本屏（一次只录一块显示器）
+    private var limit: CGRect { mode == .screenshot ? canvas.unionRect : bounds }
+
+    private func ensureMosaic() -> CGImage? {
+        if mosaicImage == nil {
+            mosaicImage = AnnotationRenderer.makeMosaic(from: snapshot.image, blockPixels: 9 * pixelScale)
+        }
+        return mosaicImage
+    }
+
+    private func draw(_ a: Annotation, in ctx: CGContext) {
+        AnnotationRenderer.draw(a, in: ctx, mosaic: a.tool == .mosaic ? ensureMosaic() : nil, imageRect: bounds)
     }
 
     // MARK: - 绘制
@@ -109,8 +145,8 @@ final class SelectionView: NSView, NSTextFieldDelegate {
         if let sel = selection, !isScrolling {
             ctx.saveGState()
             ctx.clip(to: sel)
-            for a in annotations { AnnotationRenderer.draw(a, in: ctx, mosaic: mosaicImage, imageRect: bounds) }
-            if let current { AnnotationRenderer.draw(current, in: ctx, mosaic: mosaicImage, imageRect: bounds) }
+            for a in annotations { draw(a, in: ctx) }
+            if let current { draw(current, in: ctx) }
             ctx.restoreGState()
         }
 
@@ -131,10 +167,14 @@ final class SelectionView: NSView, NSTextFieldDelegate {
 
         if let sel = selection, !isScrolling {
             if tool == nil, !(mode == .record && recordFullScreen) { drawHandles(sel, in: ctx) }
-            if !(mode == .record && recordFullScreen) { drawSizeLabel(sel) }
+            if !(mode == .record && recordFullScreen), canvas.labelOwner === self { drawSizeLabel(sel) }
         } else if selection == nil, mode == .screenshot, !isPassive, !isScrolling, case .none = drag {
             drawHint()
         }
+
+        if let message = canvas.message, (canvas.barOwner ?? self) === self { drawBanner(message) }
+
+        if let p = canvas.cursor { drawMagnifier(at: p, in: ctx) }
     }
 
     private func handleRects(_ r: CGRect) -> [CGRect] {
@@ -166,6 +206,7 @@ final class SelectionView: NSView, NSTextFieldDelegate {
         var box = CGRect(x: sel.minX, y: sel.maxY + 6, width: size.width + 12, height: size.height + 6)
         if box.maxY > bounds.maxY - 2 { box.origin.y = sel.maxY - box.height - 6; box.origin.x = sel.minX + 6 }
         box.origin.x = min(max(box.minX, bounds.minX + 2), bounds.maxX - box.width - 2)
+        box.origin.y = min(max(box.minY, bounds.minY + 2), bounds.maxY - box.height - 2)
         (mode == .record ? NSColor(white: 0.15, alpha: 0.85) : accent).setFill()
         NSBezierPath(roundedRect: box, xRadius: 5, yRadius: 5).fill()
         (text as NSString).draw(at: CGPoint(x: box.minX + 6, y: box.minY + 3), withAttributes: attrs)
@@ -174,7 +215,11 @@ final class SelectionView: NSView, NSTextFieldDelegate {
     private func drawHint() {
         let text = mode == .record
             ? "拖拽选择录制区域 · 单击选择窗口 · 单击空白处录制整屏 · Esc 取消"
-            : "拖拽选择区域 · 单击选择窗口 · Esc 取消"
+            : "拖拽选择区域（可跨屏） · 单击选择窗口 · ⌘A 选中所有屏幕 · C 复制颜色 · Esc 取消"
+        drawBanner(text)
+    }
+
+    private func drawBanner(_ text: String) {
         let attrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 13, weight: .medium),
             .foregroundColor: NSColor.white,
@@ -186,13 +231,128 @@ final class SelectionView: NSView, NSTextFieldDelegate {
         (text as NSString).draw(at: CGPoint(x: box.minX + 14, y: box.minY + 7), withAttributes: attrs)
     }
 
+    // MARK: - 取色器（放大镜）
+
+    private static let magGrid = 17                // 放大显示 17×17 个像素
+    private static let magCell: CGFloat = 8        // 每个像素放大成 8pt
+    private static var magSide: CGFloat { CGFloat(magGrid) * magCell }
+    private static let magInfoHeight: CGFloat = 58
+
+    /// 新建 / 调整选区前后显示放大镜
+    var showsMagnifier: Bool {
+        mode == .screenshot && !isScrolling && !isPassive && !canvas.hasPendingText
+            && (canvas.selection == nil || canvas.isAdjusting)
+    }
+
+    private func magnifierFrame(at p: CGPoint) -> CGRect? {
+        guard showsMagnifier, bounds.contains(p) else { return nil }
+        let w = Self.magSide, h = Self.magSide + Self.magInfoHeight
+        var x = p.x + 20, y = p.y - 20 - h
+        if x + w > bounds.maxX - 4 { x = p.x - 20 - w }
+        if y < bounds.minY + 4 { y = p.y + 20 }
+        return CGRect(x: x, y: y, width: w, height: h)
+    }
+
+    func invalidateMagnifier(at p: CGPoint) {
+        guard let f = magnifierFrame(at: p) else { return }
+        setNeedsDisplay(f.insetBy(dx: -4, dy: -4))
+    }
+
+    /// 取鼠标所在像素周围 17×17 的区域（sRGB）和中心像素颜色
+    func sample(at p: CGPoint) -> (image: CGImage, color: PixelColor)? {
+        let img = snapshot.image
+        let s = pixelScale
+        let n = Self.magGrid, half = n / 2
+        let px = min(max(Int(((p.x - bounds.minX) * s).rounded(.down)), 0), img.width - 1)
+        let py = min(max(Int(((bounds.maxY - p.y) * s).rounded(.down)), 0), img.height - 1)   // 图像坐标：左上角原点
+        let want = CGRect(x: px - half, y: py - half, width: n, height: n)
+        let crop = want.intersection(CGRect(x: 0, y: 0, width: img.width, height: img.height))
+        guard !crop.isNull, let part = img.cropping(to: crop),
+              let ctx = CGContext(data: nil, width: n, height: n, bitsPerComponent: 8, bytesPerRow: n * 4,
+                                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        ctx.interpolationQuality = .none
+        // 位图上下文左下角为原点；裁剪区域贴边时按偏移放置，保持中心像素位置不变
+        let dx = crop.minX - want.minX, dyTop = crop.minY - want.minY
+        ctx.draw(part, in: CGRect(x: dx, y: CGFloat(n) - dyTop - crop.height, width: crop.width, height: crop.height))
+        guard let data = ctx.data?.assumingMemoryBound(to: UInt8.self), let out = ctx.makeImage() else { return nil }
+        let o = half * ctx.bytesPerRow + half * 4          // 内存第一行是图像顶部
+        return (out, PixelColor(premultipliedR: data[o], g: data[o + 1], b: data[o + 2], a: data[o + 3]))
+    }
+
+    private func drawMagnifier(at p: CGPoint, in ctx: CGContext) {
+        guard let f = magnifierFrame(at: p), let picked = sample(at: p) else { return }
+        let image = picked.image, color = picked.color
+        let side = Self.magSide
+        let mag = CGRect(x: f.minX, y: f.maxY - side, width: side, height: side)
+
+        ctx.saveGState()
+        NSColor(white: 0.08, alpha: 0.94).setFill()
+        NSBezierPath(roundedRect: f, xRadius: 6, yRadius: 6).fill()
+
+        ctx.saveGState()
+        NSBezierPath(roundedRect: mag, xRadius: 6, yRadius: 6).addClip()
+        ctx.interpolationQuality = .none
+        ctx.draw(image, in: mag)
+        // 像素网格
+        ctx.setStrokeColor(NSColor(white: 0.5, alpha: 0.18).cgColor)
+        ctx.setLineWidth(0.5)
+        for i in 1..<Self.magGrid {
+            let d = CGFloat(i) * Self.magCell
+            ctx.move(to: CGPoint(x: mag.minX + d, y: mag.minY)); ctx.addLine(to: CGPoint(x: mag.minX + d, y: mag.maxY))
+            ctx.move(to: CGPoint(x: mag.minX, y: mag.minY + d)); ctx.addLine(to: CGPoint(x: mag.maxX, y: mag.minY + d))
+        }
+        ctx.strokePath()
+        // 中心十字线 + 中心像素框
+        let c = CGFloat(Self.magGrid / 2) * Self.magCell
+        let center = CGRect(x: mag.minX + c, y: mag.minY + c, width: Self.magCell, height: Self.magCell)
+        ctx.setFillColor(accent.withAlphaComponent(0.25).cgColor)
+        ctx.fill(CGRect(x: mag.minX, y: center.minY, width: side, height: Self.magCell))
+        ctx.fill(CGRect(x: center.minX, y: mag.minY, width: Self.magCell, height: side))
+        ctx.setStrokeColor((color.isLight ? NSColor.black : NSColor.white).cgColor)
+        ctx.setLineWidth(1)
+        ctx.stroke(center.insetBy(dx: 0.5, dy: 0.5))
+        ctx.restoreGState()
+
+        ctx.setStrokeColor(NSColor(white: 1, alpha: 0.25).cgColor)
+        ctx.setLineWidth(1)
+        NSBezierPath(roundedRect: f.insetBy(dx: 0.5, dy: 0.5), xRadius: 6, yRadius: 6).stroke()
+
+        // 文字：坐标 / 颜色 / 操作提示
+        let mono = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+        let white: [NSAttributedString.Key: Any] = [.font: mono, .foregroundColor: NSColor.white]
+        let gray: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor(white: 1, alpha: 0.6)]
+        let x = Int((p.x - bounds.minX).rounded(.down)), y = Int((bounds.maxY - p.y).rounded(.down))
+        ("(\(x), \(y))" as NSString).draw(at: CGPoint(x: f.minX + 8, y: mag.minY - 20), withAttributes: white)
+        let swatch = CGRect(x: f.minX + 8, y: mag.minY - 37, width: 12, height: 12)
+        ctx.setFillColor(NSColor(srgbRed: CGFloat(color.r) / 255, green: CGFloat(color.g) / 255, blue: CGFloat(color.b) / 255, alpha: 1).cgColor)
+        ctx.fill(swatch)
+        ctx.setStrokeColor(NSColor(white: 1, alpha: 0.6).cgColor)
+        ctx.stroke(swatch.insetBy(dx: 0.5, dy: 0.5))
+        (color.string(hex: CaptureCanvas.colorAsHex) as NSString).draw(at: CGPoint(x: swatch.maxX + 6, y: swatch.minY - 2), withAttributes: white)
+        ("C 复制颜色 · ⇧ 切换格式" as NSString).draw(at: CGPoint(x: f.minX + 8, y: f.minY + 5), withAttributes: gray)
+        ctx.restoreGState()
+    }
+
+    /// C 键：复制鼠标处的颜色并结束截图
+    private func copyColorUnderCursor() -> Bool {
+        guard let p = canvas.cursor, let v = canvas.view(containing: p), v.showsMagnifier,
+              let color = v.sample(at: p)?.color else { return false }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(color.string(hex: CaptureCanvas.colorAsHex), forType: .string)
+        delegate?.selectionView(self, perform: .cancel)
+        return true
+    }
+
     // MARK: - 鼠标
 
     override func mouseMoved(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
+        canvas.cursor = p
         if selection == nil, !isPassive, !isScrolling {
-            let r = snapshot.windowRects.first(where: { $0.contains(p) })?.intersection(bounds) ?? bounds
-            if r != hoverRect { hoverRect = r; needsDisplay = true }
+            let clip = mode == .screenshot ? canvas.unionRect : bounds
+            let r = canvas.windowRects.first(where: { $0.contains(p) })?.intersection(clip) ?? bounds
+            hoverRect = r
             NSCursor.crosshair.set()
         } else if let sel = selection {
             if tool != nil, sel.contains(p) {
@@ -207,17 +367,21 @@ final class SelectionView: NSView, NSTextFieldDelegate {
         }
     }
 
+    override func mouseExited(with event: NSEvent) {
+        if let c = canvas.cursor, bounds.contains(c), case .none = drag { canvas.cursor = nil }
+    }
+
     override func rightMouseDown(with event: NSEvent) {
         delegate?.selectionView(self, perform: .cancel)
     }
 
     override func mouseDown(with event: NSEvent) {
-        guard !isScrolling else { return }
+        guard !isScrolling, !isPassive else { return }
         let p = convert(event.locationInWindow, from: nil)
         didDrag = false
 
-        if textField != nil {
-            commitText()
+        if canvas.hasPendingText {
+            canvas.commitPendingText()
             return
         }
 
@@ -238,9 +402,6 @@ final class SelectionView: NSView, NSTextFieldDelegate {
                 }
                 let size = AppSettings.annotationSize
                 let width = tool == .mosaic ? AnnotationPalette.mosaicWidths[size] : AnnotationPalette.lineWidths[size]
-                if tool == .mosaic, mosaicImage == nil {
-                    mosaicImage = AnnotationRenderer.makeMosaic(from: snapshot.image, blockPixels: 9 * pixelScale)
-                }
                 current = Annotation(tool: tool, color: AnnotationPalette.color(AppSettings.annotationColorIndex),
                                      width: width, points: [p, p])
                 drag = .drawing
@@ -249,6 +410,8 @@ final class SelectionView: NSView, NSTextFieldDelegate {
             }
             if tool == nil, let h = handleIndex(at: p, in: sel) {
                 drag = .resizing(handle: h, start: p, original: sel)
+                canvas.isAdjusting = true
+                canvas.cursor = p
                 hideBars()
                 return
             }
@@ -259,38 +422,44 @@ final class SelectionView: NSView, NSTextFieldDelegate {
                 return
             }
             if tool == nil, annotations.isEmpty {
-                // 在选区外拖拽：重新选择
+                // 在选区外拖拽：重新选择（可以在另一块屏幕上）
                 selection = nil
                 drag = .creating(start: p)
+                canvas.isAdjusting = true
                 hideBars()
                 needsDisplay = true
             }
             return
         }
 
-        guard !isPassive, delegate?.selectionViewShouldBegin(self) ?? true else { return }
+        guard delegate?.selectionViewShouldBegin(self) ?? true else { return }
         drag = .creating(start: p)
+        canvas.isAdjusting = true
     }
 
     override func mouseDragged(with event: NSEvent) {
+        // 拖到其他屏幕时事件仍发给本视图，坐标超出本屏 bounds，正好是全局坐标
         let p = convert(event.locationInWindow, from: nil)
+        let lim = limit
         switch drag {
         case .none:
             return
         case .creating(let start):
+            let clamped = CGPoint(x: min(max(p.x, lim.minX), lim.maxX), y: min(max(p.y, lim.minY), lim.maxY))
+            canvas.cursor = clamped
             if !didDrag, hypot(p.x - start.x, p.y - start.y) < 3 { return }
             if !didDrag { delegate?.selectionViewDidBegin(self) }
             didDrag = true
-            let clamped = CGPoint(x: min(max(p.x, bounds.minX), bounds.maxX), y: min(max(p.y, bounds.minY), bounds.maxY))
             selection = AnnotationRenderer.rect(start, clamped)
         case .moving(let start, let original):
             didDrag = true
             var r = original.offsetBy(dx: p.x - start.x, dy: p.y - start.y)
-            r.origin.x = min(max(r.minX, bounds.minX), bounds.maxX - r.width)
-            r.origin.y = min(max(r.minY, bounds.minY), bounds.maxY - r.height)
+            r.origin.x = min(max(r.minX, lim.minX), lim.maxX - r.width)
+            r.origin.y = min(max(r.minY, lim.minY), lim.maxY - r.height)
             selection = r
         case .resizing(let h, let start, let o):
             didDrag = true
+            canvas.cursor = p
             let dx = p.x - start.x, dy = p.y - start.y
             var minX = o.minX, maxX = o.maxX, minY = o.minY, maxY = o.maxY
             if [0, 6, 7].contains(h) { minX += dx }
@@ -298,7 +467,7 @@ final class SelectionView: NSView, NSTextFieldDelegate {
             if [0, 1, 2].contains(h) { minY += dy }
             if [4, 5, 6].contains(h) { maxY += dy }
             let r = AnnotationRenderer.rect(CGPoint(x: minX, y: minY), CGPoint(x: maxX, y: maxY))
-            selection = r.intersection(bounds)
+            selection = r.intersection(lim)
         case .drawing:
             didDrag = true
             guard var c = current, let sel = selection else { return }
@@ -321,7 +490,7 @@ final class SelectionView: NSView, NSTextFieldDelegate {
             if !didDrag {
                 // 单击：选择鼠标下的窗口（无窗口则整屏）
                 delegate?.selectionViewDidBegin(self)
-                selection = (hoverRect ?? bounds).intersection(bounds)
+                selection = (hoverRect ?? bounds).intersection(limit)
             } else if let s = selection, s.width < 4 || s.height < 4 {
                 selection = nil
             }
@@ -332,6 +501,7 @@ final class SelectionView: NSView, NSTextFieldDelegate {
             break
         }
         drag = .none
+        canvas.isAdjusting = false
         if let s = selection { selection = snapped(s) }
         needsDisplay = true
         showBars()
@@ -353,6 +523,10 @@ final class SelectionView: NSView, NSTextFieldDelegate {
     // MARK: - 键盘
 
     override func keyDown(with event: NSEvent) {
+        let noCmd = event.modifierFlags.intersection([.command, .option, .control]).isEmpty
+        if mode == .screenshot, noCmd, event.charactersIgnoringModifiers?.lowercased() == "c", copyColorUnderCursor() {
+            return
+        }
         switch Int(event.keyCode) {
         case 53: // Esc
             delegate?.selectionView(self, perform: .cancel)
@@ -360,6 +534,7 @@ final class SelectionView: NSView, NSTextFieldDelegate {
             if selection != nil { delegate?.selectionView(self, perform: mode == .record ? .startRecord : .copy) }
         case 123, 124, 125, 126: // 方向键微调
             guard var s = selection, tool == nil else { return }
+            let lim = limit
             let step: CGFloat = event.modifierFlags.contains(.shift) ? 10 : 1
             switch Int(event.keyCode) {
             case 123: s.origin.x -= step
@@ -367,18 +542,37 @@ final class SelectionView: NSView, NSTextFieldDelegate {
             case 125: s.origin.y -= step
             default: s.origin.y += step
             }
-            s.origin.x = min(max(s.minX, bounds.minX), bounds.maxX - s.width)
-            s.origin.y = min(max(s.minY, bounds.minY), bounds.maxY - s.height)
+            s.origin.x = min(max(s.minX, lim.minX), lim.maxX - s.width)
+            s.origin.y = min(max(s.minY, lim.minY), lim.maxY - s.height)
             selection = s
-            layoutBars()
-            needsDisplay = true
+            showBars()
         default:
             super.keyDown(with: event)
         }
     }
 
+    /// 按下 ⇧ 切换取色器的 HEX / RGB 显示
+    override func flagsChanged(with event: NSEvent) {
+        let shift = event.modifierFlags.contains(.shift)
+        if shift, !shiftDown, mode == .screenshot, let c = canvas.cursor {
+            CaptureCanvas.colorAsHex.toggle()
+            canvas.views.forEach { $0.invalidateMagnifier(at: c) }
+        }
+        shiftDown = shift
+        super.flagsChanged(with: event)
+    }
+
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        guard textField == nil, event.modifierFlags.contains(.command), selection != nil else {
+        // ⌘A：选中所有屏幕（同时截取多块屏幕）
+        if mode == .screenshot, !isScrolling, !canvas.hasPendingText, annotations.isEmpty,
+           event.modifierFlags.intersection([.command, .shift, .option, .control]) == .command,
+           event.charactersIgnoringModifiers?.lowercased() == "a" {
+            delegate?.selectionViewDidBegin(self)
+            selection = canvas.unionRect
+            showBars()
+            return true
+        }
+        guard !canvas.hasPendingText, event.modifierFlags.contains(.command), selection != nil else {
             return super.performKeyEquivalent(with: event)
         }
         switch event.charactersIgnoringModifiers?.lowercased() {
@@ -391,12 +585,24 @@ final class SelectionView: NSView, NSTextFieldDelegate {
 
     // MARK: - 工具栏
 
-    private func showBars() {
+    /// 工具栏只显示在一块屏幕上（选区底边中点所在的屏幕）
+    private func showBars() { canvas.refreshBars() }
+    private func hideBars() { canvas.hideBars() }
+
+    func updateOwnBars() {
+        // 录屏时选区可能暂时为空（重新拖拽中），控制条留在当前录制的屏幕上
+        let owner = canvas.barOwner ?? (mode == .record && !isPassive ? self : nil)
+        guard owner === self else { hideOwnBars(); recordBar?.isHidden = true; return }
         if mode == .record {
             showRecordBar()
             return
         }
-        guard let sel = selection, !isScrolling, sel.width >= 4 else { hideBars(); return }
+        guard let sel = selection, !isScrolling, sel.width >= 4 else { hideOwnBars(); return }
+        // 选区移到另一块屏幕时工具栏跟过来；把这块屏幕的窗口设为 key，按钮第一下点击就能响应
+        if let w = window, !w.isKeyWindow, case .none = drag {
+            w.makeKeyAndOrderFront(nil)
+            w.makeFirstResponder(self)
+        }
         if toolbar == nil {
             let tb = ToolbarView(kind: .screenshot)
             tb.onCommand = { [weak self] in self?.handle($0) }
@@ -427,14 +633,14 @@ final class SelectionView: NSView, NSTextFieldDelegate {
         layoutBars()
     }
 
-    private func hideBars() {
+    func hideOwnBars() {
         toolbar?.isHidden = true
         styleBar?.isHidden = true
         pinButton?.isHidden = true
     }
 
     @objc private func pinClicked() {
-        if textField != nil { commitText() }
+        canvas.commitPendingText()
         delegate?.selectionView(self, perform: .pin)
     }
 
@@ -460,6 +666,14 @@ final class SelectionView: NSView, NSTextFieldDelegate {
             y = sel.minY + gap + sbH
             styleY = y - sbH
         }
+        // 跨屏时选区可能超出本屏：工具栏和样式行整体平移，始终留在本屏内
+        var lo = y, hi = y + size.height
+        if let sb { lo = min(lo, styleY); hi = max(hi, styleY + sb.frame.height) }
+        var shift: CGFloat = 0
+        if hi + shift > bounds.maxY - 4 { shift = bounds.maxY - 4 - hi }
+        if lo + shift < bounds.minY + 4 { shift = bounds.minY + 4 - lo }
+        y += shift
+        styleY += shift
         // 参考样式：工具栏在选区下方居中
         let x = min(max(sel.midX - size.width / 2, bounds.minX + 6), bounds.maxX - size.width - 6)
         tb.setFrameOrigin(CGPoint(x: x, y: y))
@@ -473,6 +687,7 @@ final class SelectionView: NSView, NSTextFieldDelegate {
             var px = sel.maxX + 10
             var py = sel.maxY - d - 2
             if px + d > bounds.maxX - 4 { px = sel.maxX - d - 8; py = sel.maxY - d - 8 }
+            px = min(max(px, bounds.minX + 4), bounds.maxX - d - 4)
             py = min(max(py, bounds.minY + 4), bounds.maxY - d - 4)
             pb.setFrameOrigin(CGPoint(x: px, y: py))
         }
@@ -487,29 +702,27 @@ final class SelectionView: NSView, NSTextFieldDelegate {
         case .color(let i):
             AppSettings.annotationColorIndex = i
             styleBar?.refresh(showColors: tool?.usesColor ?? true)
-            if let tf = textField { tf.textColor = AnnotationPalette.color(i) }
+            canvas.views.forEach { $0.textField?.textColor = AnnotationPalette.color(i) }
         case .size(let i):
             AppSettings.annotationSize = i
             styleBar?.refresh(showColors: tool?.usesColor ?? true)
             layoutBars()
         default:
-            if textField != nil { commitText() }
+            canvas.commitPendingText()
             delegate?.selectionView(self, perform: command)
         }
     }
 
     private func setTool(_ t: AnnotationTool?) {
-        if textField != nil { commitText() }
+        canvas.commitPendingText()
         tool = t
         showBars()
-        needsDisplay = true
     }
 
     func undo() {
         guard !annotations.isEmpty else { return }
         annotations.removeLast()
-        toolbar?.setUndoEnabled(!annotations.isEmpty)
-        needsDisplay = true
+        showBars()
     }
 
     // MARK: - 录屏控制条
@@ -531,7 +744,7 @@ final class SelectionView: NSView, NSTextFieldDelegate {
         }
         guard let bar = recordBar else { return }
         bar.setMode(fullScreen: recordFullScreen)
-        bar.setFrameOrigin(NSPoint(x: (bounds.width - bar.frame.width) / 2, y: bounds.minY + 64))
+        bar.setFrameOrigin(NSPoint(x: bounds.midX - bar.frame.width / 2, y: bounds.minY + 64))
         bar.isHidden = false
     }
 
@@ -550,15 +763,19 @@ final class SelectionView: NSView, NSTextFieldDelegate {
             if selection == nil { selection = bounds }
             delegate?.selectionView(self, perform: .startRecord)
         }
+        showBars()
         needsDisplay = true
     }
 
     static func defaultRegion(in bounds: CGRect) -> CGRect {
         let w = (bounds.width * 0.6).rounded(), h = (bounds.height * 0.6).rounded()
-        return CGRect(x: (bounds.width - w) / 2, y: (bounds.height - h) / 2 + 30, width: w, height: h)
+        return CGRect(x: bounds.minX + (bounds.width - w) / 2, y: bounds.minY + (bounds.height - h) / 2 + 30, width: w, height: h)
     }
 
     // MARK: - 文字
+
+    var hasPendingText: Bool { textField != nil }
+    func commitPendingText() { if textField != nil { commitText() } }
 
     private func beginText(at p: CGPoint) {
         let size = AnnotationPalette.fontSizes[AppSettings.annotationSize]
@@ -579,6 +796,7 @@ final class SelectionView: NSView, NSTextFieldDelegate {
         tf.layer?.borderWidth = 1
         tf.layer?.cornerRadius = 3
         addSubview(tf)
+        window?.makeKeyAndOrderFront(nil)
         window?.makeFirstResponder(tf)
         textField = tf
         hideBars()
@@ -587,7 +805,8 @@ final class SelectionView: NSView, NSTextFieldDelegate {
     func controlTextDidChange(_ obj: Notification) {
         guard let tf = textField else { return }
         let w = (tf.stringValue as NSString).size(withAttributes: [.font: tf.font!]).width + 24
-        tf.setFrameSize(NSSize(width: max(60, min(w, (selection?.maxX ?? bounds.maxX) - tf.frame.minX)), height: tf.frame.height))
+        let right = min(selection?.maxX ?? bounds.maxX, bounds.maxX)
+        tf.setFrameSize(NSSize(width: max(60, min(w, right - tf.frame.minX)), height: tf.frame.height))
     }
 
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
@@ -623,22 +842,24 @@ final class SelectionView: NSView, NSTextFieldDelegate {
     // MARK: - 长图模式
 
     func enterScrollingMode() {
-        if textField != nil { commitText() }
+        commitPendingText()
         isScrolling = true
         tool = nil
-        hideBars()
+        hideOwnBars()
         needsDisplay = true
     }
 
     // MARK: - 导出
 
-    /// 渲染选区 + 标注为像素图
+    /// 渲染选区 + 标注为像素图；选区跨屏时把各屏的冻结图拼在一起，按最高的像素密度输出
     func renderResult() -> CGImage? {
         guard let sel = selection else { return nil }
-        let s = pixelScale
+        let parts = canvas.views(intersecting: sel)
+        guard let first = parts.first else { return nil }
+        let s = parts.map(\.pixelScale).max() ?? pixelScale
         let w = Int((sel.width * s).rounded()), h = Int((sel.height * s).rounded())
         guard w > 0, h > 0 else { return nil }
-        let space = snapshot.image.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB)!
+        let space = first.snapshot.image.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB)!
         let info = CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
         guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0, space: space, bitmapInfo: info)
             ?? CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
@@ -646,11 +867,26 @@ final class SelectionView: NSView, NSTextFieldDelegate {
         else { return nil }
         ctx.scaleBy(x: s, y: s)
         ctx.translateBy(x: -sel.minX, y: -sel.minY)
-        ctx.interpolationQuality = .none
-        ctx.draw(snapshot.image, in: bounds)
+        for v in parts {
+            // 低分屏的内容放大到高分屏密度时用平滑插值，同密度保持像素原样
+            ctx.interpolationQuality = v.pixelScale == s ? .none : .high
+            ctx.draw(v.snapshot.image, in: v.bounds)
+        }
         ctx.interpolationQuality = .high
         ctx.setShouldAntialias(true)
-        for a in annotations { AnnotationRenderer.draw(a, in: ctx, mosaic: mosaicImage, imageRect: bounds) }
+        for a in canvas.annotations {
+            if a.tool == .mosaic {
+                // 马赛克底图按屏生成，逐屏裁剪绘制
+                for v in parts {
+                    ctx.saveGState()
+                    ctx.clip(to: v.bounds)
+                    AnnotationRenderer.draw(a, in: ctx, mosaic: v.ensureMosaic(), imageRect: v.bounds)
+                    ctx.restoreGState()
+                }
+            } else {
+                AnnotationRenderer.draw(a, in: ctx, mosaic: nil, imageRect: first.bounds)
+            }
+        }
         return ctx.makeImage()
     }
 }

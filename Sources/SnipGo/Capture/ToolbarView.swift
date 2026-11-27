@@ -20,6 +20,8 @@ enum ToolbarCommand {
     case save
     case copy
     case startRecord
+    case recognizeText
+    case translate
     case color(Int)
     case size(Int)
 }
@@ -94,6 +96,8 @@ final class ToolbarView: HUDBackgroundView {
             separator()
             add(symbol: "xmark", tip: "取消 Esc", command: .cancel, tint: ToolbarStyle.cancel, weight: .medium, size: 21)
             add(symbol: "rectangle.expand.vertical", tip: "长截图（滚动截图）", command: .scroll)
+            add(symbol: "text.viewfinder", tip: "识别文字", command: .recognizeText)
+            add(symbol: "character.bubble", tip: "翻译", command: .translate)
             add(symbol: "tray.and.arrow.down", tip: "保存 ⌘S", command: .save)
             add(symbol: "doc.on.doc", tip: "复制到剪贴板 ↩ / ⌘C", command: .copy)
         }

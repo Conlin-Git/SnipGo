@@ -13,6 +13,7 @@ enum SettingsKey {
     static let annotationSize = "annotationSize"      // 0/1/2
     static let hotKeyCapture = "hotKey.capture"
     static let hotKeyRecord = "hotKey.record"
+    static let translateTarget = "translateTarget"   // 上次手动选择的翻译目标语言
 }
 
 enum AppSettings {
@@ -141,6 +142,12 @@ struct Shortcut: Equatable {
 
     /// 菜单项 keyEquivalent（仅用于显示）
     var menuKeyEquivalent: String { key.count == 1 ? key.lowercased() : "" }
+
+    /// F1–F12
+    static func isFunctionKey(_ keyCode: UInt16) -> Bool {
+        [kVK_F1, kVK_F2, kVK_F3, kVK_F4, kVK_F5, kVK_F6, kVK_F7, kVK_F8, kVK_F9, kVK_F10, kVK_F11, kVK_F12]
+            .contains(Int(keyCode))
+    }
 
     static func keyName(for event: NSEvent) -> String {
         switch Int(event.keyCode) {

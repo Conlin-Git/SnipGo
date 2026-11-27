@@ -64,6 +64,10 @@ struct PreferencesView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     ShortcutRecorderView(action: .record).frame(width: 200, height: 28)
                     Text("录制中再按一次即停止").font(.callout).foregroundStyle(.secondary)
+                    Text("设置方法：点击上方输入框，直接按下新的组合键即可保存。\n组合键需包含 ⌘、⌃、⌥ 之一（如 ⌘⇧1），也可单独使用 F1–F12（fn+F1…F12）。\n按 Delete 清除，按 Esc 取消。")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
 

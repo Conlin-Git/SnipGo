@@ -6,8 +6,6 @@ struct ScreenSnapshot {
     let screen: NSScreen
     let display: SCDisplay
     let image: CGImage
-    /// 屏幕本地坐标（Cocoa，左下角原点，pt）下的窗口矩形，按前后顺序（最前在前）
-    let windowRects: [CGRect]
 }
 
 enum ScreenSnapshotter {
@@ -46,7 +44,6 @@ enum ScreenSnapshotter {
 
     static func captureAll() async throws -> [ScreenSnapshot] {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-        let windows = orderedWindowRects()
         var result: [ScreenSnapshot] = []
         for screen in NSScreen.screens {
             guard let id = displayID(of: screen),
@@ -59,12 +56,7 @@ enum ScreenSnapshotter {
             cfg.captureResolution = .best
             let filter = SCContentFilter(display: display, excludingWindows: [])
             let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: cfg)
-            let rects = windows.compactMap { r -> CGRect? in
-                let i = r.intersection(screen.frame)
-                guard !i.isNull, i.width > 10, i.height > 10 else { return nil }
-                return r.offsetBy(dx: -screen.frame.minX, dy: -screen.frame.minY)
-            }
-            result.append(ScreenSnapshot(screen: screen, display: display, image: image, windowRects: rects))
+            result.append(ScreenSnapshot(screen: screen, display: display, image: image))
         }
         return result
     }
