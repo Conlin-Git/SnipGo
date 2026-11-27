@@ -342,8 +342,11 @@ final class SelectionView: NSView, NSTextFieldDelegate {
     private func copyColorUnderCursor() -> Bool {
         guard let p = canvas.cursor, let v = canvas.view(containing: p), v.showsMagnifier,
               let color = v.sample(at: p)?.color else { return false }
+        let text = color.string(hex: CaptureCanvas.colorAsHex)
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(color.string(hex: CaptureCanvas.colorAsHex), forType: .string)
+        NSPasteboard.general.setString(text, forType: .string)
+        let swatch = NSColor(srgbRed: CGFloat(color.r) / 255, green: CGFloat(color.g) / 255, blue: CGFloat(color.b) / 255, alpha: 1)
+        CopyToast.show("已复制 \(text)", swatch: swatch, near: p)
         delegate?.selectionView(self, perform: .cancel)
         return true
     }
