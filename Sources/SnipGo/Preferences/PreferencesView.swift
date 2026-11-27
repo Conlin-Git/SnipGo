@@ -173,6 +173,12 @@ final class PreferencesWindowController: NSWindowController {
 
     required init?(coder: NSCoder) { fatalError() }
 
+    /// 打开「关于」标签页（检查更新的状态显示在这里）
+    func showAbout() {
+        (contentViewController as? NSTabViewController)?.selectedTabViewItemIndex = 1
+        show()
+    }
+
     func show() {
         NSApp.activate(ignoringOtherApps: true)
         window?.center()

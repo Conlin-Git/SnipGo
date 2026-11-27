@@ -90,6 +90,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         PreferencesWindowController.shared.show()
     }
 
+    @objc func checkForUpdates() {
+        PreferencesWindowController.shared.showAbout()
+        Updater.shared.check()
+    }
+
     // MARK: - 菜单栏
 
     private func setupStatusItem() {
@@ -162,6 +167,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let prefs = NSMenuItem(title: "偏好设置…", action: #selector(openPreferences), keyEquivalent: ",")
         prefs.target = self
         menu.addItem(prefs)
+        let update = NSMenuItem(title: "检查更新…", action: #selector(checkForUpdates), keyEquivalent: "")
+        update.target = self
+        menu.addItem(update)
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "退出 SnipGo", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
     }
