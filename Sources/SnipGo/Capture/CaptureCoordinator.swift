@@ -13,6 +13,7 @@ final class CaptureCoordinator: SelectionViewDelegate {
     private var previousApp: NSRunningApplication?
     private var scrollSession: ScrollCaptureSession?
     private var mode: CaptureMode = .screenshot
+    private var canvas: CaptureCanvas?
 
     func start(mode: CaptureMode) {
         guard !isActive else { return }
@@ -37,9 +38,12 @@ final class CaptureCoordinator: SelectionViewDelegate {
     private func present(_ snapshots: [ScreenSnapshot]) {
         let mouse = NSEvent.mouseLocation
         var keyWindow: OverlayWindow?
+        // 所有屏幕共享一个画布：选区可跨屏移动，跨屏选区导出为一张图
+        let canvas = CaptureCanvas(mode: mode, windowRects: ScreenSnapshotter.orderedWindowRects())
+        self.canvas = canvas
         for snap in snapshots {
             let w = OverlayWindow(screen: snap.screen)
-            let content = OverlayContentView(snapshot: snap, mode: mode)
+            let content = OverlayContentView(snapshot: snap, canvas: canvas)
             content.selectionView.delegate = self
             w.contentView = content
             overlays.append(w)
@@ -78,6 +82,7 @@ final class CaptureCoordinator: SelectionViewDelegate {
         overlays.removeAll()
         contents.removeAll()
         activeView = nil
+        canvas = nil
         isActive = false
         NSCursor.arrow.set()
         restoreFocus()
@@ -94,12 +99,15 @@ final class CaptureCoordinator: SelectionViewDelegate {
     // MARK: - SelectionViewDelegate
 
     func selectionViewShouldBegin(_ view: SelectionView) -> Bool {
-        activeView == nil || activeView === view
+        // 截图可以在任意屏幕上开始 / 重新选择；录屏只能在一块屏幕上
+        mode == .screenshot || activeView == nil || activeView === view
     }
 
     func selectionViewDidBegin(_ view: SelectionView) {
         activeView = view
-        for c in contents where c.selectionView !== view { c.selectionView.isPassive = true }
+        if mode == .record {
+            for c in contents where c.selectionView !== view { c.selectionView.isPassive = true }
+        }
         if let w = view.window, !w.isKeyWindow {
             w.makeKeyAndOrderFront(nil)
         }
@@ -134,14 +142,20 @@ final class CaptureCoordinator: SelectionViewDelegate {
             ImageOutput.playCaptureSound()
             finish()
         case .pin:
-            guard let img = view.renderResult(), let sel = view.selection else { return }
-            let global = sel.offsetBy(dx: view.snapshot.screen.frame.minX, dy: view.snapshot.screen.frame.minY)
+            guard let img = view.renderResult(), let sel = view.selection else { return }   // 选区已是全局坐标
             finish()
-            PinManager.pin(img, frame: global, pointSize: sel.size)
+            PinManager.pin(img, frame: sel, pointSize: sel.size)
         case .scroll:
             startScroll(view)
         case .startRecord:
             startRecording(view)
+        case .recognizeText, .translate:
+            guard let img = view.renderResult(), let sel = view.selection else { return }
+            var translate = false
+            if case .translate = command { translate = true }
+            // 先显示面板再关闭遮罩，焦点留在面板上
+            TextPanelController.show(image: img, anchor: sel, translate: translate)
+            finish()
         default:
             break
         }
@@ -151,12 +165,20 @@ final class CaptureCoordinator: SelectionViewDelegate {
 
     private func startScroll(_ view: SelectionView) {
         guard let sel = view.selection, sel.height >= 40, sel.width >= 40 else { NSSound.beep(); return }
+        // 长截图按显示器采帧，选区必须在同一块屏幕内
+        guard let owner = canvas?.singleScreenView(for: sel) else {
+            NSSound.beep()
+            canvas?.flash("长截图不支持跨屏选区，请把选区放在同一块屏幕内")
+            return
+        }
+        let view = owner
+        let local = sel.offsetBy(dx: -view.bounds.minX, dy: -view.bounds.minY)
         for c in contents {
             c.showFrozenImage(false)
             c.selectionView.enterScrollingMode()
         }
         overlays.forEach { $0.ignoresMouseEvents = true }
-        let session = ScrollCaptureSession(snapshot: view.snapshot, selection: sel)
+        let session = ScrollCaptureSession(snapshot: view.snapshot, selection: local)
         session.onFinish = { [weak self] image, action in
             guard let self else { return }
             self.scrollSession = nil
@@ -173,9 +195,8 @@ final class CaptureCoordinator: SelectionViewDelegate {
                         NSWorkspace.shared.activateFileViewerSelecting([url])
                     }
                 case .pin:
-                    let global = sel.offsetBy(dx: view.snapshot.screen.frame.minX, dy: view.snapshot.screen.frame.minY)
                     self.finish()
-                    PinManager.pin(image, frame: global, pointSize: pointSize)
+                    PinManager.pin(image, frame: sel, pointSize: pointSize)
                     return
                 case .cancel:
                     break
@@ -190,13 +211,16 @@ final class CaptureCoordinator: SelectionViewDelegate {
     // MARK: - 录屏
 
     private func startRecording(_ view: SelectionView) {
+        // 录屏选区限制在一块屏幕内，控制条也在那块屏幕上
+        let view = canvas?.barOwner ?? view
         guard let sel = view.selection else { return }
         let snapshot = view.snapshot
         if !view.recordFullScreen, let id = ScreenSnapshotter.displayID(of: snapshot.screen) {
             Self.lastRecordRegions[id] = sel
         }
+        let local = sel.offsetBy(dx: -view.bounds.minX, dy: -view.bounds.minY)   // 全局 → 屏幕本地
         finish()
-        RecordingSession.start(snapshot: snapshot, rect: sel)
+        RecordingSession.start(snapshot: snapshot, rect: local)
     }
 
     static func showError(_ title: String, _ error: Error) {

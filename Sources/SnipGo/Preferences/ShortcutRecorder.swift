@@ -43,7 +43,7 @@ final class ShortcutRecorderControl: NSView {
         path.lineWidth = 1
         path.stroke()
         let text: String
-        if recording { text = "按下快捷键…" } else { text = action.shortcut?.displayString ?? "未设置" }
+        if recording { text = "请按下组合键…" } else { text = action.shortcut?.displayString ?? "点击设置" }
         let attrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 13, weight: .medium),
             .foregroundColor: recording || action.shortcut == nil ? NSColor.secondaryLabelColor : NSColor.labelColor,
@@ -87,8 +87,9 @@ final class ShortcutRecorderControl: NSView {
         default:
             break
         }
-        // 至少需要 ⌘ / ⌃ / ⌥ 之一
-        guard !mods.intersection([.command, .control, .option]).isEmpty else { NSSound.beep(); return }
+        // 至少需要 ⌘ / ⌃ / ⌥ 之一；F1–F12（Mac 键盘上即 fn+F1…F12）可单独使用
+        guard !mods.intersection([.command, .control, .option]).isEmpty || Shortcut.isFunctionKey(event.keyCode)
+        else { NSSound.beep(); return }
         action.shortcut = Shortcut(keyCode: UInt32(event.keyCode), modifiers: mods, key: Shortcut.keyName(for: event))
         endRecording(changed: true)
     }
