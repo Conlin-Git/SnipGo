@@ -135,6 +135,17 @@ final class CaptureCoordinator: SelectionViewDelegate {
             finish()
         case .save:
             guard let img = view.renderResult() else { return }
+            if SaveLocationGuide.isNeeded {
+                // 首次保存：先关闭遮罩（它在最上层会挡住引导窗口），再引导选择保存位置
+                finish()
+                SaveLocationGuide.runIfNeeded()
+                if ImageOutput.save(img) == nil {
+                    Self.showError("保存失败", NSError(domain: "SnipGo", code: 2, userInfo: [NSLocalizedDescriptionKey: "无法写入 \(AppSettings.saveDirectory.path)"]))
+                } else {
+                    ImageOutput.playCaptureSound()
+                }
+                return
+            }
             if ImageOutput.save(img) == nil {
                 Self.showError("保存失败", NSError(domain: "SnipGo", code: 2, userInfo: [NSLocalizedDescriptionKey: "无法写入 \(AppSettings.saveDirectory.path)"]))
                 return
@@ -190,6 +201,16 @@ final class CaptureCoordinator: SelectionViewDelegate {
                     ImageOutput.copyToPasteboard(image, pointSize: pointSize)
                     ImageOutput.playCaptureSound()
                 case .save:
+                    if SaveLocationGuide.isNeeded {
+                        // 首次保存：先关闭遮罩，再引导选择保存位置
+                        self.finish()
+                        SaveLocationGuide.runIfNeeded()
+                        if let url = ImageOutput.save(image) {
+                            ImageOutput.playCaptureSound()
+                            NSWorkspace.shared.activateFileViewerSelecting([url])
+                        }
+                        return
+                    }
                     if let url = ImageOutput.save(image) {
                         ImageOutput.playCaptureSound()
                         NSWorkspace.shared.activateFileViewerSelecting([url])

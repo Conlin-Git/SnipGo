@@ -136,6 +136,7 @@ struct PreferencesView: View {
         panel.directoryURL = URL(fileURLWithPath: saveDirectory, isDirectory: true)
         if panel.runModal() == .OK, let url = panel.url {
             saveDirectory = url.path
+            SaveLocationGuide.markConfirmed()
         }
     }
 }
