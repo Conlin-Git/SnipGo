@@ -2,37 +2,37 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleDevelopmentRegion</key>
-    <string>zh-Hans</string>
-    <key>CFBundleLocalizations</key>
-    <array>
-        <string>zh-Hans</string>
-    </array>
-    <key>CFBundleName</key>
-    <string>SnipGo</string>
-    <key>CFBundleDisplayName</key>
-    <string>SnipGo</string>
-    <key>CFBundleIdentifier</key>
-    <string>local.snipgo.app</string>
-    <key>CFBundleExecutable</key>
-    <string>SnipGo</string>
-    <key>CFBundleIconFile</key>
-    <string>AppIcon</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleShortVersionString</key>
-    <string>1.1.2</string>
-    <key>CFBundleVersion</key>
-    <string>4</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>15.0</string>
-    <key>LSUIElement</key>
-    <true/>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-    <key>NSMicrophoneUsageDescription</key>
-    <string>录制视频时需要录制麦克风声音。</string>
-    <key>NSHumanReadableCopyright</key>
-    <string>© 2026 Conlin · github.com/Conlin-Git/SnipGo</string>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>zh-Hans</string>
+	<key>CFBundleDisplayName</key>
+	<string>SnipGo</string>
+	<key>CFBundleExecutable</key>
+	<string>SnipGo</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleIdentifier</key>
+	<string>local.snipgo.app</string>
+	<key>CFBundleLocalizations</key>
+	<array>
+		<string>zh-Hans</string>
+	</array>
+	<key>CFBundleName</key>
+	<string>SnipGo</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.1.3</string>
+	<key>CFBundleVersion</key>
+	<string>5</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>15.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>© 2026 Conlin · github.com/Conlin-Git/SnipGo</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>录制视频时需要录制麦克风声音。</string>
 </dict>
 </plist>
