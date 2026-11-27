@@ -27,10 +27,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             MainActor.assumeIsolated { self?.updateStatusButton() }
         }
 
-        // 首次启动检查屏幕录制权限（未授权时系统会弹出授权）
-        if !CGPreflightScreenCaptureAccess() {
-            CGRequestScreenCaptureAccess()
-        }
+        // 检查屏幕录制权限（未授权时系统会弹出授权；更新后旧授权失效时先清除再申请）
+        Permissions.checkScreenCaptureOnLaunch()
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
