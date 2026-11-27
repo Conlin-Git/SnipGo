@@ -38,7 +38,7 @@
 
 ### 方式一：安装包
 
-下载 [Resources/SnipGo-1.1.0.dmg](Resources/SnipGo-1.1.0.dmg)，打开后把 SnipGo 拖到「应用程序」。
+下载 [Resources/SnipGo-1.1.1.dmg](Resources/SnipGo-1.1.1.dmg)，打开后把 SnipGo 拖到「应用程序」。
 
 > 安装包使用 ad-hoc 签名，没有经过 Apple 公证。第一次打开时如果系统提示无法验证开发者，请在 **系统设置 › 隐私与安全性** 中点「仍要打开」，或在「应用程序」里右键 SnipGo 选择「打开」。
 
