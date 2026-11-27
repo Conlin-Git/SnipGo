@@ -204,7 +204,7 @@ final class Updater: ObservableObject {
         return staged
     }
 
-    /// 启动替换脚本：等当前进程退出后替换应用并重新打开；失败时还原旧版本
+    /// 启动替换脚本：先等旧版本退出，再清除旧授权（新版本签名不同，旧授权会失效），然后替换应用并重新打开；替换失败时还原旧版本
     private static func launchReplacer(staged: URL, target: URL) throws {
         let parent = target.deletingLastPathComponent()
         guard FileManager.default.isWritableFile(atPath: parent.path) else {
@@ -212,8 +212,9 @@ final class Updater: ObservableObject {
         }
         let script = """
         #!/bin/sh
-        PID="$1"; SRC="$2"; DST="$3"
+        PID="$1"; SRC="$2"; DST="$3"; BID="$4"
         while kill -0 "$PID" 2>/dev/null; do sleep 0.2; done
+        [ -n "$BID" ] && /usr/bin/tccutil reset ScreenCapture "$BID" >/dev/null 2>&1
         TMP="$DST.updating"; OLD="$DST.old"
         rm -rf "$TMP" "$OLD"
         if ! /usr/bin/ditto "$SRC" "$TMP"; then rm -rf "$TMP"; open "$DST"; exit 1; fi
@@ -231,7 +232,8 @@ final class Updater: ObservableObject {
         try script.write(to: scriptURL, atomically: true, encoding: .utf8)
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/sh")
-        p.arguments = [scriptURL.path, String(ProcessInfo.processInfo.processIdentifier), staged.path, target.path]
+        p.arguments = [scriptURL.path, String(ProcessInfo.processInfo.processIdentifier), staged.path, target.path,
+                       Bundle.main.bundleIdentifier ?? ""]
         try p.run()
     }
 
