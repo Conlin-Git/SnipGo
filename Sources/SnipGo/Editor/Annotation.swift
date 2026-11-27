@@ -1,0 +1,156 @@
+import AppKit
+import CoreImage
+
+enum AnnotationTool: Int, CaseIterable {
+    case rect, ellipse, line, arrow, pen, mosaic, text
+
+    var symbol: String {
+        switch self {
+        case .rect: return "square"
+        case .ellipse: return "circle"
+        case .line: return "line.diagonal"
+        case .arrow: return "arrow.up.left"
+        case .pen: return "pencil"
+        case .mosaic: return "squareshape.split.3x3"
+        case .text: return "textformat"
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .rect: return "矩形"
+        case .ellipse: return "椭圆"
+        case .line: return "直线"
+        case .arrow: return "箭头"
+        case .pen: return "画笔"
+        case .mosaic: return "马赛克"
+        case .text: return "文字"
+        }
+    }
+
+    /// 是否使用颜色
+    var usesColor: Bool { self != .mosaic }
+}
+
+struct Annotation {
+    var tool: AnnotationTool
+    var color: NSColor
+    var width: CGFloat
+    var points: [CGPoint]
+    var text: String = ""
+    var fontSize: CGFloat = 22
+
+    var isMeaningful: Bool {
+        switch tool {
+        case .pen, .mosaic: return points.count > 1
+        case .text: return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        default:
+            guard let a = points.first, let b = points.last else { return false }
+            return hypot(a.x - b.x, a.y - b.y) > 3
+        }
+    }
+
+    static func textAttributes(fontSize: CGFloat, color: NSColor) -> [NSAttributedString.Key: Any] {
+        [.font: NSFont.systemFont(ofSize: fontSize, weight: .semibold), .foregroundColor: color]
+    }
+}
+
+/// 屏幕绘制与导出共用的渲染器（坐标系：非翻转，单位 pt）
+enum AnnotationRenderer {
+    /// - Parameters:
+    ///   - mosaic: 马赛克底图（覆盖整屏，绘制到 imageRect）
+    static func draw(_ a: Annotation, in ctx: CGContext, mosaic: CGImage?, imageRect: CGRect) {
+        ctx.saveGState()
+        defer { ctx.restoreGState() }
+        ctx.setLineCap(.round)
+        ctx.setLineJoin(.round)
+        ctx.setStrokeColor(a.color.cgColor)
+        ctx.setFillColor(a.color.cgColor)
+        ctx.setLineWidth(a.width)
+
+        guard let p0 = a.points.first, let p1 = a.points.last else { return }
+        switch a.tool {
+        case .rect:
+            ctx.stroke(rect(p0, p1))
+        case .ellipse:
+            ctx.strokeEllipse(in: rect(p0, p1))
+        case .line:
+            ctx.move(to: p0)
+            ctx.addLine(to: p1)
+            ctx.strokePath()
+        case .arrow:
+            drawArrow(from: p0, to: p1, width: a.width, in: ctx)
+        case .pen:
+            ctx.addPath(smoothPath(a.points))
+            ctx.strokePath()
+        case .mosaic:
+            guard let mosaic else { return }
+            ctx.addPath(smoothPath(a.points))
+            ctx.setLineWidth(a.width)
+            ctx.replacePathWithStrokedPath()
+            ctx.clip()
+            ctx.interpolationQuality = .none
+            ctx.draw(mosaic, in: imageRect)
+        case .text:
+            let ns = NSGraphicsContext(cgContext: ctx, flipped: false)
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = ns
+            NSAttributedString(string: a.text, attributes: Annotation.textAttributes(fontSize: a.fontSize, color: a.color))
+                .draw(at: p0)
+            NSGraphicsContext.restoreGraphicsState()
+        }
+    }
+
+    static func rect(_ a: CGPoint, _ b: CGPoint) -> CGRect {
+        CGRect(x: min(a.x, b.x), y: min(a.y, b.y), width: abs(a.x - b.x), height: abs(a.y - b.y))
+    }
+
+    static func smoothPath(_ pts: [CGPoint]) -> CGPath {
+        let path = CGMutablePath()
+        guard let first = pts.first else { return path }
+        path.move(to: first)
+        if pts.count == 1 {
+            path.addLine(to: first)
+            return path
+        }
+        for i in 1..<pts.count {
+            let prev = pts[i - 1], cur = pts[i]
+            let mid = CGPoint(x: (prev.x + cur.x) / 2, y: (prev.y + cur.y) / 2)
+            path.addQuadCurve(to: mid, control: prev)
+        }
+        path.addLine(to: pts[pts.count - 1])
+        return path
+    }
+
+    static func drawArrow(from s: CGPoint, to e: CGPoint, width: CGFloat, in ctx: CGContext) {
+        let len = hypot(e.x - s.x, e.y - s.y)
+        guard len > 0.5 else { return }
+        let angle = atan2(e.y - s.y, e.x - s.x)
+        let headLen = min(max(14, width * 4.5), len * 0.8)
+        let headW = headLen * 0.8
+        let base = CGPoint(x: e.x - cos(angle) * headLen * 0.85, y: e.y - sin(angle) * headLen * 0.85)
+        ctx.move(to: s)
+        ctx.addLine(to: base)
+        ctx.strokePath()
+        let back = CGPoint(x: e.x - cos(angle) * headLen, y: e.y - sin(angle) * headLen)
+        let perp = CGPoint(x: -sin(angle), y: cos(angle))
+        ctx.move(to: e)
+        ctx.addLine(to: CGPoint(x: back.x + perp.x * headW / 2, y: back.y + perp.y * headW / 2))
+        ctx.addLine(to: CGPoint(x: back.x - perp.x * headW / 2, y: back.y - perp.y * headW / 2))
+        ctx.closePath()
+        ctx.fillPath()
+    }
+
+    /// 生成整张截图的马赛克底图
+    static func makeMosaic(from image: CGImage, blockPixels: CGFloat) -> CGImage? {
+        let ci = CIImage(cgImage: image)
+        let out = ci.clampedToExtent()
+            .applyingFilter("CIPixellate", parameters: [
+                kCIInputScaleKey: blockPixels,
+                kCIInputCenterKey: CIVector(x: 0, y: 0),
+            ])
+            .cropped(to: ci.extent)
+        let ctx = CIContext(options: [.useSoftwareRenderer: false])
+        return ctx.createCGImage(out, from: ci.extent, format: .RGBA8, colorSpace: image.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB)!)
+    }
+}
