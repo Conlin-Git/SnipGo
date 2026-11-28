@@ -8,6 +8,7 @@ struct PreferencesView: View {
     @AppStorage(SettingsKey.recordSystemAudio) private var recordSystemAudio = false
     @AppStorage(SettingsKey.recordMicrophone) private var recordMicrophone = false
     @AppStorage(SettingsKey.recordShowCursor) private var recordShowCursor = true
+    @AppStorage(SettingsKey.recordShowClicks) private var recordShowClicks = true
     @AppStorage(SettingsKey.filePrefix) private var filePrefix = "SnipGo_"
     @AppStorage(SettingsKey.saveDirectory) private var saveDirectory = AppSettings.defaultSaveDirectory
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
@@ -52,6 +53,7 @@ struct PreferencesView: View {
                     Toggle("录制系统声音", isOn: $recordSystemAudio)
                     Toggle("录制麦克风", isOn: $recordMicrophone)
                     Toggle("显示鼠标指针", isOn: $recordShowCursor)
+                    Toggle("显示点击圆环", isOn: $recordShowClicks)
                     Text("视频格式：mp4（H.264）").font(.callout).foregroundStyle(.secondary)
                 }
             }

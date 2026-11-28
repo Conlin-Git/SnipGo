@@ -7,6 +7,7 @@ enum SettingsKey {
     static let recordSystemAudio = "recordSystemAudio"
     static let recordMicrophone = "recordMicrophone"
     static let recordShowCursor = "recordShowCursor"
+    static let recordShowClicks = "recordShowClicks"
     static let filePrefix = "filePrefix"
     static let saveDirectory = "saveDirectory"
     static let saveDirectoryConfirmed = "saveDirectoryConfirmed"   // 已完成首次保存位置引导
@@ -27,6 +28,7 @@ enum AppSettings {
             SettingsKey.recordSystemAudio: false,
             SettingsKey.recordMicrophone: false,
             SettingsKey.recordShowCursor: true,
+            SettingsKey.recordShowClicks: true,
             SettingsKey.filePrefix: "SnipGo_",
             SettingsKey.saveDirectory: defaultSaveDirectory,
             SettingsKey.annotationColor: 0,
@@ -50,6 +52,10 @@ enum AppSettings {
         set { defaults.set(newValue, forKey: SettingsKey.recordMicrophone) }
     }
     static var recordShowCursor: Bool { defaults.bool(forKey: SettingsKey.recordShowCursor) }
+    static var recordShowClicks: Bool {
+        get { defaults.bool(forKey: SettingsKey.recordShowClicks) }
+        set { defaults.set(newValue, forKey: SettingsKey.recordShowClicks) }
+    }
     static var filePrefix: String { defaults.string(forKey: SettingsKey.filePrefix) ?? "SnipGo_" }
     static var saveDirectory: URL {
         URL(fileURLWithPath: defaults.string(forKey: SettingsKey.saveDirectory) ?? defaultSaveDirectory, isDirectory: true)

@@ -90,7 +90,10 @@ final class RecordingSession: NSObject, SCRecordingOutputDelegate, SCStreamDeleg
         cfg.width = max(2, Int((rect.width * scale).rounded()) & ~1)
         cfg.height = max(2, Int((rect.height * scale).rounded()) & ~1)
         cfg.minimumFrameInterval = CMTime(value: 1, timescale: 60)
+        // ScreenCaptureKit 的点击圆环仅支持 BGRA，指针与圆环可独立录入。
+        cfg.pixelFormat = kCVPixelFormatType_32BGRA
         cfg.showsCursor = AppSettings.recordShowCursor
+        cfg.showMouseClicks = AppSettings.recordShowClicks
         cfg.queueDepth = 6
         cfg.captureResolution = .best
         cfg.capturesAudio = AppSettings.recordSystemAudio
