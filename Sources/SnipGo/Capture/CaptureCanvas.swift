@@ -22,7 +22,9 @@ final class CaptureCanvas {
         }
     }
     var movingAnnotation: (index: Int, preview: Annotation)? { didSet { redraw() } }
+    var editingTextIndex: Int? { didSet { redraw() } }
     var visibleAnnotations: [Annotation] {
+        if let index = editingTextIndex { return annotations.enumerated().compactMap { $0.offset == index ? nil : $0.element } }
         guard let move = movingAnnotation else { return annotations }
         var visible = annotations
         visible[move.index] = move.preview
@@ -42,7 +44,7 @@ final class CaptureCanvas {
     var canUndo: Bool { !undoHistory.isEmpty }
 
     func undoAnnotationChange() {
-        guard movingAnnotation == nil, let previous = undoHistory.popLast() else { return }
+        guard movingAnnotation == nil, editingTextIndex == nil, let previous = undoHistory.popLast() else { return }
         annotations = previous
     }
 

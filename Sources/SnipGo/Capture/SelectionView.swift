@@ -34,7 +34,7 @@ final class OverlayContentView: NSView {
 
 /// 单块屏幕上的选区视图。选区、标注、当前工具等状态保存在共享的 CaptureCanvas 中，
 /// 本视图的 bounds 即该屏幕的全局矩形。
-final class SelectionView: NSView, NSTextFieldDelegate {
+final class SelectionView: NSView {
     weak var delegate: SelectionViewDelegate?
 
     let snapshot: ScreenSnapshot
@@ -88,7 +88,7 @@ final class SelectionView: NSView, NSTextFieldDelegate {
     private var recordBar: RecordControlBar?
     private(set) var recordFullScreen = false
     private var lastRegion: CGRect?
-    private var textField: NSTextField?
+    private var textEditor: AnnotationTextEditor?
 
     private let accent = NSColor(srgbRed: 0.16, green: 0.5, blue: 1, alpha: 1)
 
@@ -571,7 +571,12 @@ final class SelectionView: NSView, NSTextFieldDelegate {
         case .drawing:
             if let c = current, c.isMeaningful { canvas.changeAnnotations { $0.append(c) } }
             current = nil
-        case .movingAnnotation:
+        case .movingAnnotation(let index, let start, let original, _):
+            if !didDrag, original.tool == .text {
+                drag = .none
+                beginText(at: start, editing: index)
+                return
+            }
             if didDrag { mouseDragged(with: event) }
             if let move = canvas.movingAnnotation {
                 canvas.movingAnnotation = nil
@@ -897,7 +902,7 @@ final class SelectionView: NSView, NSTextFieldDelegate {
         case .color(let i):
             AppSettings.annotationColorIndex = i
             styleBar?.refresh(showColors: tool?.usesColor ?? true)
-            canvas.views.forEach { $0.textField?.textColor = AnnotationPalette.color(i) }
+            canvas.views.forEach { $0.textEditor?.input.textColor = AnnotationPalette.color(i) }
         case .size(let i):
             AppSettings.annotationSize = i
             styleBar?.refresh(showColors: tool?.usesColor ?? true)
@@ -974,104 +979,46 @@ final class SelectionView: NSView, NSTextFieldDelegate {
 
     // MARK: - 文字
 
-    var hasPendingText: Bool { textField != nil }
-    func commitPendingText() { if textField != nil { commitText() } }
+    var hasPendingText: Bool { textEditor != nil }
+    func commitPendingText() { finishText(save: true) }
 
-    private func editorWidth(for text: String, font: NSFont) -> CGFloat {
-        let attributes: [NSAttributedString.Key: Any] = [.font: font]
-        let minimum = ("zhongwen" as NSString).size(withAttributes: attributes).width
-        let content = (text as NSString).size(withAttributes: attributes).width
-        return ceil(max(minimum, content)) + 6  // 两侧内边距和插入光标
-    }
-
-    private func beginText(at p: CGPoint) {
-        let size = AnnotationPalette.fontSizes[AppSettings.annotationSize]
-        let font = NSFont.systemFont(ofSize: size, weight: .semibold)
-        let h = ceil(font.ascender - font.descender + font.leading) + 4
-        guard let sel = selection, let window else { return }
-        let area = sel.intersection(bounds)
-        let width = min(area.width, editorWidth(for: "", font: font))
-        let x = max(area.minX, min(p.x, area.maxX - width))
-        let y = max(area.minY, min(p.y - h / 2, area.maxY - h))
-        // 输入法组字时改变 NSTextField 自身的尺寸会干扰共享编辑器。只伸缩外层的可见区域。
-        let box = NSView(frame: NSRect(x: x, y: y, width: width, height: h))
-        box.wantsLayer = true
-        box.clipsToBounds = true
-        box.layer?.borderColor = NSColor(white: 1, alpha: 0.6).cgColor
-        box.layer?.borderWidth = 1
-        box.layer?.cornerRadius = 3
-        let tf = NSTextField(frame: NSRect(x: 0, y: 0, width: area.maxX - x, height: h))
-        tf.font = font
-        tf.textColor = AnnotationPalette.color(AppSettings.annotationColorIndex)
-        tf.isBordered = false
-        tf.isBezeled = false
-        tf.drawsBackground = false
-        tf.focusRingType = .none
-        tf.cell?.wraps = false
-        tf.cell?.isScrollable = true
-        tf.delegate = self
-        textField = tf
+    private func beginText(at point: CGPoint, editing index: Int? = nil) {
+        guard let selection, let window else { return }
+        let annotation = index.map { annotations[$0] } ?? Annotation(
+            tool: .text, color: AnnotationPalette.color(AppSettings.annotationColorIndex), width: 0,
+            points: [point], fontSize: AnnotationPalette.fontSizes[AppSettings.annotationSize])
+        let editor = AnnotationTextEditor(annotation: annotation, at: annotation.points[0],
+                                          in: selection.intersection(bounds), isNew: index == nil)
+        editor.onFinish = { [weak self] save in self?.finishText(save: save) }
+        textEditor = editor
+        canvas.editingTextIndex = index
         hideBars()
-        box.addSubview(tf)
-        addSubview(box)
+        addSubview(editor)
         if !window.isKeyWindow { window.makeKeyAndOrderFront(nil) }
-        window.makeFirstResponder(tf)
-        if let storage = (tf.currentEditor() as? NSTextView)?.textStorage {
-            NotificationCenter.default.addObserver(self, selector: #selector(annotationTextChanged(_:)),
-                                                   name: NSTextStorage.didProcessEditingNotification, object: storage)
-        }
+        window.makeFirstResponder(editor.input)
+        if index != nil { editor.placeCaret(at: point) }
     }
 
-    @objc private func annotationTextChanged(_ notification: Notification) {
-        guard let storage = notification.object as? NSTextStorage,
-              storage.editedMask.contains(.editedCharacters), let field = textField else { return }
-        // 系统输入法直接修改 field editor 的暂存文字。等本次组字结束布局后再调整外框。
-        DispatchQueue.main.async { [weak self, weak field] in
-            guard let self, let field, self.textField === field,
-                  let editor = field.currentEditor(), let font = field.font, let box = field.superview else { return }
-            let width = min(field.frame.width, self.editorWidth(for: editor.string, font: font))
-            if width != box.frame.width {
-                box.setFrameSize(NSSize(width: width, height: box.frame.height))
+    private func finishText(save: Bool) {
+        guard let editor = textEditor else { return }
+        let index = canvas.editingTextIndex
+        if save {
+            let result = editor.result()
+            if let index {
+                if !result.isMeaningful {
+                    canvas.changeAnnotations { $0.remove(at: index) }
+                } else if annotations[index].text != result.text || annotations[index].color != result.color {
+                    canvas.changeAnnotations { $0[index] = result }
+                }
+            } else if result.isMeaningful {
+                canvas.changeAnnotations { $0.append(result) }
             }
         }
-    }
-
-    private func removeTextField() {
-        NotificationCenter.default.removeObserver(self, name: NSTextStorage.didProcessEditingNotification, object: nil)
-        let field = textField
-        textField = nil
-        field?.superview?.removeFromSuperview()
-    }
-
-    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
-        guard control === textField, !textView.hasMarkedText() else { return false }
-        if [#selector(NSResponder.insertNewline(_:)), #selector(NSResponder.insertTab(_:)),
-            #selector(NSResponder.insertBacktab(_:))].contains(commandSelector) {
-            commitText()
-            return true
-        }
-        if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
-            removeTextField()
-            window?.makeFirstResponder(self)
-            showBars()
-            return true
-        }
-        return false
-    }
-
-    private func commitText() {
-        guard let tf = textField else { return }
-        let font = tf.font ?? NSFont.systemFont(ofSize: 22)
-        // NSTextField 文字左侧约 2pt 内边距；draw(at:) 的原点是文字框左下角
-        let frame = convert(tf.bounds, from: tf)
-        let origin = CGPoint(x: frame.minX + 2, y: frame.minY + 2)
-        let a = Annotation(tool: .text, color: tf.textColor ?? .red, width: 0, points: [origin],
-                           text: tf.currentEditor()?.string ?? tf.stringValue, fontSize: font.pointSize)
-        removeTextField()
-        if a.isMeaningful { canvas.changeAnnotations { $0.append(a) } }
+        textEditor = nil
+        canvas.editingTextIndex = nil
         window?.makeFirstResponder(self)
+        editor.removeFromSuperview()
         showBars()
-        needsDisplay = true
     }
 
     // MARK: - 长图模式

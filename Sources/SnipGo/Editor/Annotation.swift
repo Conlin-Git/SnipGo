@@ -70,8 +70,7 @@ struct Annotation {
         let path: CGPath
         switch tool {
         case .text:
-            let size = (text as NSString).size(withAttributes: Self.textAttributes(fontSize: fontSize, color: color))
-            return CGPath(rect: CGRect(origin: a, size: size).insetBy(dx: -tolerance, dy: -tolerance), transform: nil)
+            return CGPath(rect: textBounds.insetBy(dx: -tolerance, dy: -tolerance), transform: nil)
         case .step:
             let radius = stepDiameter / 2 + tolerance
             return CGPath(ellipseIn: CGRect(x: a.x - radius, y: a.y - radius, width: 2 * radius, height: 2 * radius), transform: nil)
@@ -89,6 +88,22 @@ struct Annotation {
             return stroke.union(head.path)
         }
         return stroke
+    }
+
+    private static let textDrawingOptions: NSString.DrawingOptions = [.usesLineFragmentOrigin, .usesFontLeading]
+
+    /// 以首行左上角定位，增加行数不会挪动第一行。
+    var textBounds: CGRect {
+        guard let anchor = points.first else { return .zero }
+        let attributes = Self.textAttributes(fontSize: fontSize, color: color)
+        let measured = (text as NSString).boundingRect(with: CGSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude),
+                                                       options: Self.textDrawingOptions, attributes: attributes)
+        return CGRect(x: anchor.x, y: anchor.y - ceil(measured.height), width: ceil(measured.width), height: ceil(measured.height))
+    }
+
+    func drawText() {
+        (text as NSString).draw(with: textBounds, options: Self.textDrawingOptions,
+                                attributes: Self.textAttributes(fontSize: fontSize, color: color))
     }
 
     static func textAttributes(fontSize: CGFloat, color: NSColor) -> [NSAttributedString.Key: Any] {
@@ -138,8 +153,7 @@ enum AnnotationRenderer {
             let ns = NSGraphicsContext(cgContext: ctx, flipped: false)
             NSGraphicsContext.saveGraphicsState()
             NSGraphicsContext.current = ns
-            NSAttributedString(string: a.text, attributes: Annotation.textAttributes(fontSize: a.fontSize, color: a.color))
-                .draw(at: p0)
+            a.drawText()
             NSGraphicsContext.restoreGraphicsState()
         }
     }
