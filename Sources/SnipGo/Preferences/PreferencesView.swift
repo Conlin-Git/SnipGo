@@ -53,7 +53,7 @@ struct PreferencesView: View {
                     Toggle("录制系统声音", isOn: $recordSystemAudio)
                     Toggle("录制麦克风", isOn: $recordMicrophone)
                     Toggle("显示鼠标指针", isOn: $recordShowCursor)
-                    Toggle("显示点击圆环", isOn: $recordShowClicks)
+                    Toggle("按下时显示实心圆", isOn: $recordShowClicks)
                     Text("视频格式：mp4（H.264）").font(.callout).foregroundStyle(.secondary)
                 }
             }

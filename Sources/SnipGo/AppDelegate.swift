@@ -116,7 +116,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func updateStatusButton() {
         guard let button = statusItem?.button else { return }
-        if let rec = RecordingSession.current {
+        if RecordingSession.current?.isSaving == true {
+            button.image = nil
+            button.title = "正在保存录屏…"
+            button.toolTip = button.title
+            button.action = nil
+            statusItem.menu = nil
+        } else if let rec = RecordingSession.current {
             // QuickTime 风格：菜单栏显示停止按钮，单击即停止录制
             let img = NSImage(systemSymbolName: "stop.circle", accessibilityDescription: "停止录制")
             img?.isTemplate = true

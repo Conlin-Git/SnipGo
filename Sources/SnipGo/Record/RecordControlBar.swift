@@ -143,7 +143,7 @@ final class RecordControlBar: NSVisualEffectView {
         menu.addItem(.separator())
         menu.addItem(NSMenuItem.sectionHeader(title: "选项"))
         toggle("显示鼠标指针", AppSettings.recordShowCursor, #selector(toggleCursor))
-        toggle("显示点击圆环", AppSettings.recordShowClicks, #selector(toggleClicks))
+        toggle("按下时显示实心圆", AppSettings.recordShowClicks, #selector(toggleClicks))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem.sectionHeader(title: "存储位置"))
         let path = NSMenuItem(title: (AppSettings.saveDirectory.path as NSString).abbreviatingWithTildeInPath, action: nil, keyEquivalent: "")

@@ -2,9 +2,17 @@ import AppKit
 import AVFoundation
 import ScreenCaptureKit
 
-/// 空输出：让 SCStream 有对应类型的接收者，避免丢帧日志
-final class NullStreamOutput: NSObject, SCStreamOutput {
-    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {}
+/// 屏幕与音频回调共用同一串行队列。首个完整视频帧用于对齐鼠标轨迹。
+private final class RecordingStreamOutput: NSObject, SCStreamOutput {
+    private(set) var firstFrameTime: Double?
+
+    func stream(_ stream: SCStream, didOutputSampleBuffer buffer: CMSampleBuffer, of type: SCStreamOutputType) {
+        guard type == .screen, firstFrameTime == nil,
+              let info = (CMSampleBufferGetSampleAttachmentsArray(buffer, createIfNecessary: false)
+                          as? [[SCStreamFrameInfo: Any]])?.first,
+              let status = info[.status] as? Int, status == SCFrameStatus.complete.rawValue else { return }
+        firstFrameTime = buffer.presentationTimeStamp.seconds
+    }
 }
 
 extension Notification.Name {
@@ -23,8 +31,11 @@ final class RecordingSession: NSObject, SCRecordingOutputDelegate, SCStreamDeleg
     private var boundary: RecordingBoundary?
     private var stream: SCStream?
     private var recordingOutput: SCRecordingOutput?
-    private let nullOutput = NullStreamOutput()
-    private let outputQueue = DispatchQueue(label: "snipgo.record.null")
+    private let streamOutput = RecordingStreamOutput()
+    private var pointer: RecordingPointer?
+    private var captureStartTime: Double = 0
+    private(set) var isSaving = false
+    private let outputQueue = DispatchQueue(label: "snipgo.record.samples")
     private var timer: Timer?
     private(set) var startDate: Date?
     private var stopping = false
@@ -90,10 +101,13 @@ final class RecordingSession: NSObject, SCRecordingOutputDelegate, SCStreamDeleg
         cfg.width = max(2, Int((rect.width * scale).rounded()) & ~1)
         cfg.height = max(2, Int((rect.height * scale).rounded()) & ~1)
         cfg.minimumFrameInterval = CMTime(value: 1, timescale: 60)
-        // ScreenCaptureKit 的点击圆环仅支持 BGRA，指针与圆环可独立录入。
+        if AppSettings.recordShowClicks {
+            let region = rect.offsetBy(dx: snapshot.screen.frame.minX, dy: snapshot.screen.frame.minY)
+            pointer = RecordingPointer(region: region, showsHand: AppSettings.recordShowCursor)
+        }
         cfg.pixelFormat = kCVPixelFormatType_32BGRA
-        cfg.showsCursor = AppSettings.recordShowCursor
-        cfg.showMouseClicks = AppSettings.recordShowClicks
+        cfg.showsCursor = pointer == nil && AppSettings.recordShowCursor
+        cfg.showMouseClicks = false
         cfg.queueDepth = 6
         cfg.captureResolution = .best
         cfg.capturesAudio = AppSettings.recordSystemAudio
@@ -103,9 +117,9 @@ final class RecordingSession: NSObject, SCRecordingOutputDelegate, SCStreamDeleg
         cfg.captureMicrophone = useMic
 
         let s = SCStream(filter: filter, configuration: cfg, delegate: self)
-        try s.addStreamOutput(nullOutput, type: .screen, sampleHandlerQueue: outputQueue)
-        if cfg.capturesAudio { try s.addStreamOutput(nullOutput, type: .audio, sampleHandlerQueue: outputQueue) }
-        if useMic { try s.addStreamOutput(nullOutput, type: .microphone, sampleHandlerQueue: outputQueue) }
+        try s.addStreamOutput(streamOutput, type: .screen, sampleHandlerQueue: outputQueue)
+        if cfg.capturesAudio { try s.addStreamOutput(streamOutput, type: .audio, sampleHandlerQueue: outputQueue) }
+        if useMic { try s.addStreamOutput(streamOutput, type: .microphone, sampleHandlerQueue: outputQueue) }
 
         let rc = SCRecordingOutputConfiguration()
         rc.outputURL = outputURL
@@ -116,6 +130,8 @@ final class RecordingSession: NSObject, SCRecordingOutputDelegate, SCStreamDeleg
         recordingOutput = output
         stream = s
 
+        captureStartTime = CMClockGetTime(CMClockGetHostTimeClock()).seconds
+        pointer?.start()
         try await s.startCapture()
         guard Self.current === self else { try? await s.stopCapture(); return }
         startDate = Date()
@@ -154,8 +170,27 @@ final class RecordingSession: NSObject, SCRecordingOutputDelegate, SCStreamDeleg
     }
 
     private func finishUp(success: Bool) {
-        guard Self.current === self else { return }
+        guard Self.current === self, !isSaving else { return }
         teardown()
+        if success, let pointer {
+            isSaving = true
+            stopping = true
+            tick()
+            let firstFrame = outputQueue.sync { streamOutput.firstFrameTime } ?? captureStartTime
+            Task {
+                do {
+                    try await pointer.finishVideo(at: outputURL, firstFrameTime: firstFrame)
+                } catch {
+                    CaptureCoordinator.showError("鼠标效果导出失败，已保留原始录屏", error)
+                }
+                complete(success: true)
+            }
+        } else {
+            complete(success: success)
+        }
+    }
+
+    private func complete(success: Bool) {
         Self.current = nil
         NotificationCenter.default.post(name: .recordingStateChanged, object: nil)
         if success {
@@ -165,6 +200,7 @@ final class RecordingSession: NSObject, SCRecordingOutputDelegate, SCStreamDeleg
     }
 
     private func teardown() {
+        pointer?.stop()
         boundary?.orderOut(nil)
         boundary?.close()
         boundary = nil
