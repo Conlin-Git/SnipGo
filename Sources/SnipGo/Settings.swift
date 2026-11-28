@@ -69,10 +69,12 @@ enum AppSettings {
 enum HotKeyAction: String, CaseIterable {
     case capture
     case record
+    case recent
 
     var defaultsKey: String {
         switch self {
         case .capture: return SettingsKey.hotKeyCapture
+        case .recent: return "hotKey.recent"
         case .record: return SettingsKey.hotKeyRecord
         }
     }
@@ -80,6 +82,7 @@ enum HotKeyAction: String, CaseIterable {
     var title: String {
         switch self {
         case .capture: return "截图"
+        case .recent: return "最近截图"
         case .record: return "录屏"
         }
     }
@@ -87,6 +90,7 @@ enum HotKeyAction: String, CaseIterable {
     var defaultShortcut: Shortcut {
         switch self {
         case .capture: return Shortcut(keyCode: UInt32(kVK_ANSI_1), modifiers: [.command, .shift], key: "1")
+        case .recent: return Shortcut(keyCode: UInt32(kVK_ANSI_H), modifiers: [.control, .option], key: "H")
         case .record: return Shortcut(keyCode: UInt32(kVK_ANSI_2), modifiers: [.command, .shift], key: "2")
         }
     }

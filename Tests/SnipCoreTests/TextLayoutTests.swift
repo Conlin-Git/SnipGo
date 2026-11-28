@@ -58,6 +58,21 @@ final class TextLayoutTests: XCTestCase {
         XCTAssertEqual(TextLayout.compose(items), "名称 价格\n苹果 5\n香蕉 3")
     }
 
+    func testTableKeepsMissingCellsAndColumnOrder() {
+        let items = [frag("C", x: 180, y: 1), frag("A", x: 0, y: 0), frag("B", x: 90, y: 0),
+                     frag("3", x: 185, y: 26), frag("1", x: 0, y: 26),
+                     frag("中", x: 90, y: 52)]
+        let rows = TextLayout.tableRows(items)
+        XCTAssertEqual(rows, [["A", "B", "C"], ["1", "", "3"], ["", "中", ""]])
+        XCTAssertEqual(TextLayout.tabSeparated(rows), "A\tB\tC\n1\t\t3\n\t中\t")
+    }
+
+    func testTableJoinsTextFragmentsInsideCell() {
+        let items = [frag("苹", x: 0, y: 0), frag("果", x: 12, y: 0), frag("8", x: 92, y: 0)]
+        XCTAssertEqual(TextLayout.tableRows(items), [["苹果", "8"]])
+        XCTAssertTrue(TextLayout.tableRows([]).isEmpty)
+    }
+
     func testEmptyInput() {
         XCTAssertEqual(TextLayout.compose([]), "")
         XCTAssertEqual(TextLayout.compose([frag("   ", x: 0, y: 0)]), "")

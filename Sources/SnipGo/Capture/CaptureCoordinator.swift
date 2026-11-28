@@ -18,6 +18,7 @@ final class CaptureCoordinator: SelectionViewDelegate {
     func start(mode: CaptureMode) {
         guard !isActive else { return }
         guard Permissions.ensureScreenCapture() else { return }
+        RecentCaptures.shared.dismissThumbnail()
         isActive = true
         self.mode = mode
         let front = NSWorkspace.shared.frontmostApplication
@@ -80,6 +81,7 @@ final class CaptureCoordinator: SelectionViewDelegate {
         overlays.forEach { $0.orderOut(nil) }
         overlays.forEach { $0.close() }
         overlays.removeAll()
+        canvas?.detachViews()
         contents.removeAll()
         activeView = nil
         canvas = nil
@@ -89,7 +91,7 @@ final class CaptureCoordinator: SelectionViewDelegate {
     }
 
     func restoreFocus() {
-        let otherVisible = NSApp.windows.contains { $0.isVisible && !($0 is OverlayWindow) && !($0 is FloatingPanel) && $0.className != "NSStatusBarWindow" }
+        let otherVisible = NSApp.windows.contains { $0.isVisible && !($0 is OverlayWindow) && !($0 is FloatingPanel) && !($0 is RecentThumbnailPanel) && $0.className != "NSStatusBarWindow" }
         if !otherVisible {
             if let app = previousApp { app.activate() } else { NSApp.hide(nil) }
         }
@@ -131,6 +133,7 @@ final class CaptureCoordinator: SelectionViewDelegate {
         case .copy:
             guard let img = view.renderResult() else { return }
             ImageOutput.copyToPasteboard(img, pointSize: view.selection?.size)
+            if let size = view.selection?.size { RecentCaptures.shared.add(img, size: size) }
             ImageOutput.playCaptureSound()
             finish()
         case .save:
@@ -142,6 +145,7 @@ final class CaptureCoordinator: SelectionViewDelegate {
                 if ImageOutput.save(img) == nil {
                     Self.showError("保存失败", NSError(domain: "SnipGo", code: 2, userInfo: [NSLocalizedDescriptionKey: "无法写入 \(AppSettings.saveDirectory.path)"]))
                 } else {
+                    if let size = view.selection?.size { RecentCaptures.shared.add(img, size: size) }
                     ImageOutput.playCaptureSound()
                 }
                 return
@@ -150,6 +154,7 @@ final class CaptureCoordinator: SelectionViewDelegate {
                 Self.showError("保存失败", NSError(domain: "SnipGo", code: 2, userInfo: [NSLocalizedDescriptionKey: "无法写入 \(AppSettings.saveDirectory.path)"]))
                 return
             }
+            if let size = view.selection?.size { RecentCaptures.shared.add(img, size: size) }
             ImageOutput.playCaptureSound()
             finish()
         case .pin:
@@ -191,6 +196,7 @@ final class CaptureCoordinator: SelectionViewDelegate {
                                        height: CGFloat(image.height) / view.snapshot.screen.backingScaleFactor)
                 switch action {
                 case .copy:
+                    RecentCaptures.shared.add(image, size: pointSize)
                     ImageOutput.copyToPasteboard(image, pointSize: pointSize)
                     ImageOutput.playCaptureSound()
                 case .save:
@@ -199,12 +205,14 @@ final class CaptureCoordinator: SelectionViewDelegate {
                         self.finish()
                         SaveLocationGuide.runIfNeeded()
                         if let url = ImageOutput.save(image) {
+                            RecentCaptures.shared.add(image, size: pointSize)
                             ImageOutput.playCaptureSound()
                             NSWorkspace.shared.activateFileViewerSelecting([url])
                         }
                         return
                     }
                     if let url = ImageOutput.save(image) {
+                        RecentCaptures.shared.add(image, size: pointSize)
                         ImageOutput.playCaptureSound()
                         NSWorkspace.shared.activateFileViewerSelecting([url])
                     }

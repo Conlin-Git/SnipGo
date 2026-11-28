@@ -69,6 +69,37 @@ public enum TextLayout {
         return result
     }
 
+    /// 规则表格：根据横跨各行的空白带确定列，再把每行的文字放回相应位置。
+    public static func tableRows(_ fragments: [TextFragment]) -> [[String]] {
+        let items = fragments.filter { $0.width > 0 && $0.height > 0 && !$0.text.isEmpty }
+        guard !items.isEmpty else { return [] }
+        let gap = max(2, median(items.map(\.height)) * 0.5)
+        var edges: [Double] = []
+        for item in items.sorted(by: { $0.minX < $1.minX }) {
+            if let end = edges.last, item.minX - end <= gap {
+                edges[edges.count - 1] = max(end, item.maxX)
+            } else {
+                edges.append(item.maxX)
+            }
+        }
+        return groupLines(items).map { line in
+            var columns = Array(repeating: [TextFragment](), count: edges.count)
+            var index = 0
+            for fragment in line {
+                while index + 1 < edges.count && fragment.minX > edges[index] { index += 1 }
+                columns[index].append(fragment)
+            }
+            return columns.map { $0.isEmpty ? "" : joinLine($0) }
+        }
+    }
+
+    public static func tabSeparated(_ rows: [[String]]) -> String {
+        rows.map { row in
+            row.map { $0.replacingOccurrences(of: "\t", with: " ")
+                .components(separatedBy: .newlines).joined(separator: " ") }.joined(separator: "\t")
+        }.joined(separator: "\n")
+    }
+
     // MARK: - 分栏
 
     /// 找出所有片段都不覆盖的竖向空白带作为栏间距；只有每栏都像正文（行数够、行够宽）时才分栏，避免把表格拆散

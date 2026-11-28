@@ -51,6 +51,8 @@ final class TextPanelModel: ObservableObject {
     @Published private(set) var mode: Mode
     @Published private(set) var isRecognizing = true
     @Published private(set) var recognizeError: String?
+    @Published var table: [[String]] = []
+    @Published var viewingTable = false
     @Published var sourceText = ""
     @Published private(set) var sourceLanguage: String?
     @Published var translatedText = ""
@@ -61,10 +63,26 @@ final class TextPanelModel: ObservableObject {
     @Published var config: TranslationSession.Configuration?
     @Published private(set) var hint: String?
 
+    @Published private(set) var isReadingTable = false
+    private let image: CGImage
+    private var didReadTable = false
+
+    func toggleTable() {
+        viewingTable.toggle()
+        guard viewingTable, !didReadTable else { return }
+        didReadTable = true
+        isReadingTable = true
+        Task {
+            if let cells = await TextRecognizer.documentTable(image) { table = cells }
+            isReadingTable = false
+        }
+    }
+
     private var userPickedTarget = false
     private var hintTask: Task<Void, Never>?
 
     init(image: CGImage, translate: Bool) {
+        self.image = image
         mode = translate ? .translate : .recognize
         target = TranslateLanguages.defaultTarget(forSource: nil)
         Task { await recognize(image) }
@@ -75,7 +93,9 @@ final class TextPanelModel: ObservableObject {
 
     private func recognize(_ image: CGImage) async {
         do {
-            let text = try await TextRecognizer.recognize(image)
+            let fragments = try await TextRecognizer.recognize(image)
+            let text = TextLayout.compose(fragments)
+            table = TextLayout.tableRows(fragments)
             sourceText = text
             sourceLanguage = TranslateLanguages.normalizedID(TextRecognizer.dominantLanguage(of: text))
         } catch {
@@ -174,7 +194,12 @@ final class TextPanelModel: ObservableObject {
 
     /// ⌘C 且没有选中文字时：翻译模式复制译文，识别模式复制全部识别结果
     func copyPrimary() {
-        if mode == .translate, !translatedText.isEmpty {
+        if mode == .recognize, viewingTable {
+            guard !isReadingTable else { return }
+            let tsv = TextLayout.tabSeparated(table)
+            copy(tsv, hint: "已复制表格")
+            NSPasteboard.general.setString(tsv, forType: .tabularText)
+        } else if mode == .translate, !translatedText.isEmpty {
             copy(translatedText, hint: "已复制译文")
         } else {
             copy(sourceText, hint: "已复制")
@@ -198,7 +223,8 @@ struct TextCardView: View {
                 if pickingLanguage {
                     languageList
                 } else if model.mode == .recognize {
-                    sourceEditor
+                    if model.viewingTable && model.isReadingTable { ProgressView("正在读取表格…") }
+                    else if model.viewingTable { tablePreview } else { sourceEditor }
                 } else {
                     translationEditor
                 }
@@ -219,7 +245,7 @@ struct TextCardView: View {
     private var header: some View {
         HStack(spacing: 8) {
             if model.mode == .recognize {
-                Text("识别结果").font(.system(size: 16, weight: .semibold))
+                Text(model.viewingTable ? "表格预览" : "识别结果").font(.system(size: 16, weight: .semibold))
             } else {
                 Text("翻译为").font(.system(size: 16)).foregroundStyle(.secondary)
                 Button { pickingLanguage.toggle() } label: {
@@ -251,6 +277,25 @@ struct TextCardView: View {
             .help("关闭 Esc")
         }
         .frame(height: 24)
+    }
+
+    private var tablePreview: some View {
+        ScrollView([.horizontal, .vertical]) {
+            LazyVStack(alignment: .leading, spacing: 1) {
+                ForEach(model.table.indices, id: \.self) { row in
+                    HStack(spacing: 1) {
+                        ForEach(model.table[row].indices, id: \.self) { column in
+                            TextField("", text: $model.table[row][column])
+                                .textFieldStyle(.plain)
+                                .padding(4)
+                                .frame(width: 96, alignment: .leading)
+                                .background(Color.secondary.opacity(0.09))
+                                .accessibilityLabel("第\(row + 1)行第\(column + 1)列")
+                        }
+                    }
+                }
+            }
+        }
     }
 
     private var sourceEditor: some View {
@@ -324,16 +369,18 @@ struct TextCardView: View {
     }
 
     private var footer: some View {
-        let canCopy = model.mode == .recognize ? model.hasText : !model.translatedText.isEmpty
+        let canCopy = model.mode == .recognize ? (model.viewingTable ? !model.isReadingTable && !model.table.isEmpty : model.hasText) : !model.translatedText.isEmpty
         return HStack {
             if let hint = model.hint {
                 Label(hint, systemImage: "checkmark.circle.fill").font(.system(size: 12)).foregroundStyle(.green)
+            } else if model.mode == .recognize && !model.table.isEmpty {
+                Button(model.viewingTable ? "返回文字" : "表格预览") { model.toggleTable() }
             } else {
                 Text(model.mode == .recognize ? "系统离线识别" : "系统离线翻译").font(.system(size: 12)).foregroundStyle(.tertiary)
             }
             Spacer()
             Button { model.copyPrimary() } label: {
-                CopyButtonLabel(enabled: canCopy)
+                CopyButtonLabel(enabled: canCopy, title: model.mode == .recognize && model.viewingTable ? "复制表格" : "复制")
             }
             .buttonStyle(.plain)
             .disabled(!canCopy)
@@ -419,10 +466,11 @@ private extension View {
 /// 蓝色「复制」按钮：悬停时加深并显示手形光标
 private struct CopyButtonLabel: View {
     let enabled: Bool
+    let title: String
     @State private var hovering = false
 
     var body: some View {
-        Text("复制")
+        Text(title)
             .font(.system(size: 14, weight: .medium))
             .foregroundStyle(.white)
             .padding(.horizontal, 20)

@@ -22,6 +22,7 @@ enum PinManager {
         rect.origin.x = min(max(rect.minX, visible.minX), visible.maxX - rect.width)
         rect.origin.y = min(max(rect.minY, visible.minY), visible.maxY - rect.height)
 
+        RecentCaptures.shared.add(image, size: pointSize)
         let w = PinWindow(image: image, frame: rect, baseSize: pointSize, zoom: fit)
         windows.append(w)
         w.orderFrontRegardless()
