@@ -12,12 +12,40 @@ final class CaptureCanvas {
     var selection: CGRect? { didSet { if oldValue != selection { redraw() } } }
     var hoverRect: CGRect? { didSet { if oldValue != hoverRect { redraw() } } }
     var tool: AnnotationTool? { didSet { redraw() } }
-    var annotations: [Annotation] = [] {
+    private var undoHistory: [[Annotation]] = []
+    private var hitPaths: [CGPath]?
+    private(set) var annotations: [Annotation] = [] {
         didSet {
+            hitPaths = nil
             views.forEach { $0.closeTextCard() }
             redraw()
         }
     }
+    var movingAnnotation: (index: Int, preview: Annotation)? { didSet { redraw() } }
+    var visibleAnnotations: [Annotation] {
+        guard let move = movingAnnotation else { return annotations }
+        var visible = annotations
+        visible[move.index] = move.preview
+        return visible
+    }
+
+    func annotationIndex(at point: CGPoint) -> Int? {
+        if hitPaths == nil { hitPaths = annotations.map(\.hitPath) }
+        return hitPaths?.lastIndex { $0.boundingBoxOfPath.contains(point) && $0.contains(point) }
+    }
+
+    func changeAnnotations(_ change: (inout [Annotation]) -> Void) {
+        undoHistory.append(annotations)
+        change(&annotations)
+    }
+
+    var canUndo: Bool { !undoHistory.isEmpty }
+
+    func undoAnnotationChange() {
+        guard movingAnnotation == nil, let previous = undoHistory.popLast() else { return }
+        annotations = previous
+    }
+
     var current: Annotation? { didSet { redraw() } }
 
     /// 正在新建 / 调整选区（此时也显示取色放大镜）

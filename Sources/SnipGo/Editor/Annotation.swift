@@ -62,6 +62,35 @@ struct Annotation {
         }
     }
 
+    /// 只命中空心图形的轮廓，让用户仍能在圈内继续标注。
+    var hitPath: CGPath {
+        guard let a = points.first, let b = points.last else { return CGMutablePath() }
+        let tolerance: CGFloat = 4
+        let box = AnnotationRenderer.rect(a, b)
+        let path: CGPath
+        switch tool {
+        case .text:
+            let size = (text as NSString).size(withAttributes: Self.textAttributes(fontSize: fontSize, color: color))
+            return CGPath(rect: CGRect(origin: a, size: size).insetBy(dx: -tolerance, dy: -tolerance), transform: nil)
+        case .step:
+            let radius = stepDiameter / 2 + tolerance
+            return CGPath(ellipseIn: CGRect(x: a.x - radius, y: a.y - radius, width: 2 * radius, height: 2 * radius), transform: nil)
+        case .rect: path = CGPath(rect: box, transform: nil)
+        case .ellipse: path = CGPath(ellipseIn: box, transform: nil)
+        case .pen, .mosaic: path = AnnotationRenderer.smoothPath(points)
+        case .line, .arrow:
+            let line = CGMutablePath()
+            line.move(to: a)
+            line.addLine(to: b)
+            path = line
+        }
+        let stroke = path.copy(strokingWithWidth: width + 2 * tolerance, lineCap: .round, lineJoin: .round, miterLimit: 10)
+        if tool == .arrow, let head = AnnotationRenderer.arrowHead(from: a, to: b, width: width) {
+            return stroke.union(head.path)
+        }
+        return stroke
+    }
+
     static func textAttributes(fontSize: CGFloat, color: NSColor) -> [NSAttributedString.Key: Any] {
         [.font: NSFont.systemFont(ofSize: fontSize, weight: .semibold), .foregroundColor: color]
     }
@@ -158,22 +187,29 @@ enum AnnotationRenderer {
         return path
     }
 
-    static func drawArrow(from s: CGPoint, to e: CGPoint, width: CGFloat, in ctx: CGContext) {
+    static func arrowHead(from s: CGPoint, to e: CGPoint, width: CGFloat) -> (base: CGPoint, path: CGPath)? {
         let len = hypot(e.x - s.x, e.y - s.y)
-        guard len > 0.5 else { return }
+        guard len > 0.5 else { return nil }
         let angle = atan2(e.y - s.y, e.x - s.x)
         let headLen = min(max(14, width * 4.5), len * 0.8)
         let headW = headLen * 0.8
         let base = CGPoint(x: e.x - cos(angle) * headLen * 0.85, y: e.y - sin(angle) * headLen * 0.85)
-        ctx.move(to: s)
-        ctx.addLine(to: base)
-        ctx.strokePath()
         let back = CGPoint(x: e.x - cos(angle) * headLen, y: e.y - sin(angle) * headLen)
         let perp = CGPoint(x: -sin(angle), y: cos(angle))
-        ctx.move(to: e)
-        ctx.addLine(to: CGPoint(x: back.x + perp.x * headW / 2, y: back.y + perp.y * headW / 2))
-        ctx.addLine(to: CGPoint(x: back.x - perp.x * headW / 2, y: back.y - perp.y * headW / 2))
-        ctx.closePath()
+        let path = CGMutablePath()
+        path.move(to: e)
+        path.addLine(to: CGPoint(x: back.x + perp.x * headW / 2, y: back.y + perp.y * headW / 2))
+        path.addLine(to: CGPoint(x: back.x - perp.x * headW / 2, y: back.y - perp.y * headW / 2))
+        path.closeSubpath()
+        return (base, path)
+    }
+
+    static func drawArrow(from s: CGPoint, to e: CGPoint, width: CGFloat, in ctx: CGContext) {
+        guard let head = arrowHead(from: s, to: e, width: width) else { return }
+        ctx.move(to: s)
+        ctx.addLine(to: head.base)
+        ctx.strokePath()
+        ctx.addPath(head.path)
         ctx.fillPath()
     }
 

@@ -53,10 +53,7 @@ final class SelectionView: NSView, NSTextFieldDelegate {
         get { canvas.tool }
         set { canvas.tool = newValue }
     }
-    private(set) var annotations: [Annotation] {
-        get { canvas.annotations }
-        set { canvas.annotations = newValue }
-    }
+    var annotations: [Annotation] { canvas.annotations }
     private var current: Annotation? {
         get { canvas.current }
         set { canvas.current = newValue }
@@ -72,6 +69,7 @@ final class SelectionView: NSView, NSTextFieldDelegate {
         case creating(start: CGPoint)
         case moving(start: CGPoint, original: CGRect)
         case resizing(handle: Int, start: CGPoint, original: CGRect)
+        case movingAnnotation(index: Int, start: CGPoint, original: Annotation, extent: CGRect)
         case drawing
     }
 
@@ -149,7 +147,7 @@ final class SelectionView: NSView, NSTextFieldDelegate {
         if let sel = selection, !isScrolling {
             ctx.saveGState()
             ctx.clip(to: sel)
-            for a in annotations { draw(a, in: ctx) }
+            for a in canvas.visibleAnnotations { draw(a, in: ctx) }
             if let current { draw(current, in: ctx) }
             ctx.restoreGState()
         }
@@ -363,10 +361,13 @@ final class SelectionView: NSView, NSTextFieldDelegate {
         } else if let sel = selection {
             // 鼠标在工具栏、按钮、结果卡片等子视图上时，光标交给子视图（按钮显示手形）
             if subviews.contains(where: { !$0.isHidden && $0.frame.contains(p) }) { return }
-            if tool != nil, sel.contains(p) {
-                (tool == .text ? NSCursor.iBeam : NSCursor.crosshair).set()
-            } else if tool == nil, let h = handleIndex(at: p, in: sel) {
+            if canvas.hasPendingText { return }
+            if tool == nil, let h = handleIndex(at: p, in: sel) {
                 Self.resizeCursor(forHandle: h).set()
+            } else if mode == .screenshot, sel.contains(p), canvas.annotationIndex(at: p) != nil {
+                NSCursor.openHand.set()
+            } else if tool != nil, sel.contains(p) {
+                (tool == .text ? NSCursor.iBeam : NSCursor.crosshair).set()
             } else if tool == nil, sel.contains(p) {
                 NSCursor.openHand.set()
             } else {
@@ -402,7 +403,7 @@ final class SelectionView: NSView, NSTextFieldDelegate {
             updated[index].number = next
             next += 1
         }
-        annotations = updated
+        canvas.changeAnnotations { $0 = updated }
         showBars()
     }
 
@@ -411,10 +412,8 @@ final class SelectionView: NSView, NSTextFieldDelegate {
         let p = convert(event.locationInWindow, from: nil)
         didDrag = false
 
-        if canvas.hasPendingText {
-            canvas.commitPendingText()
-            return
-        }
+        let finishedText = canvas.hasPendingText
+        if finishedText { canvas.commitPendingText() }
 
         if mode == .record, recordFullScreen {
             if event.clickCount == 2 { delegate?.selectionView(self, perform: .startRecord) }
@@ -426,6 +425,21 @@ final class SelectionView: NSView, NSTextFieldDelegate {
                 delegate?.selectionView(self, perform: mode == .record ? .startRecord : .copy)
                 return
             }
+            if tool == nil, let h = handleIndex(at: p, in: sel) {
+                Self.resizeCursor(forHandle: h).set()
+                drag = .resizing(handle: h, start: p, original: sel)
+                canvas.isAdjusting = true
+                canvas.cursor = p
+                hideBars()
+                return
+            }
+            if mode == .screenshot, sel.contains(p), let index = canvas.annotationIndex(at: p) {
+                let original = annotations[index]
+                drag = .movingAnnotation(index: index, start: p, original: original, extent: original.hitPath.boundingBoxOfPath)
+                NSCursor.closedHand.set()
+                return
+            }
+            if finishedText { return }
             if let tool, sel.contains(p) {
                 if tool == .step {
                     placeStep(at: p)
@@ -440,14 +454,6 @@ final class SelectionView: NSView, NSTextFieldDelegate {
                 current = Annotation(tool: tool, color: AnnotationPalette.color(AppSettings.annotationColorIndex),
                                      width: width, points: [p, p])
                 drag = .drawing
-                hideBars()
-                return
-            }
-            if tool == nil, let h = handleIndex(at: p, in: sel) {
-                Self.resizeCursor(forHandle: h).set()
-                drag = .resizing(handle: h, start: p, original: sel)
-                canvas.isAdjusting = true
-                canvas.cursor = p
                 hideBars()
                 return
             }
@@ -484,8 +490,9 @@ final class SelectionView: NSView, NSTextFieldDelegate {
         guard stepIndex(at: point) == nil else { return }
         let number = annotations.filter { $0.tool == .step }.count + 1
         let font = [CGFloat(18), 22, 26][AppSettings.annotationSize]
-        annotations.append(Annotation(tool: .step, color: AnnotationPalette.color(AppSettings.annotationColorIndex),
-                                      width: 1, points: [point], fontSize: font, number: number))
+        let step = Annotation(tool: .step, color: AnnotationPalette.color(AppSettings.annotationColorIndex),
+                              width: 1, points: [point], fontSize: font, number: number)
+        canvas.changeAnnotations { $0.append(step) }
         showBars()
     }
 
@@ -520,6 +527,16 @@ final class SelectionView: NSView, NSTextFieldDelegate {
             if [4, 5, 6].contains(h) { maxY += dy }
             let r = AnnotationRenderer.rect(CGPoint(x: minX, y: minY), CGPoint(x: maxX, y: maxY))
             selection = r.intersection(lim)
+        case .movingAnnotation(let index, let start, let original, let extent):
+            guard let sel = selection, didDrag || hypot(p.x - start.x, p.y - start.y) >= 3 else { return }
+            if !didDrag { hideBars() }
+            didDrag = true
+            // 已经超出选区的部分允许移回来，开始拖动时仍保持原来的抓取位置。
+            let dx = min(max(p.x - start.x, min(0, sel.minX - extent.minX)), max(0, sel.maxX - extent.maxX))
+            let dy = min(max(p.y - start.y, min(0, sel.minY - extent.minY)), max(0, sel.maxY - extent.maxY))
+            var moved = original
+            moved.points = original.points.map { CGPoint(x: $0.x + dx, y: $0.y + dy) }
+            canvas.movingAnnotation = (index, moved)
         case .drawing:
             didDrag = true
             guard var c = current, let sel = selection else { return }
@@ -552,8 +569,17 @@ final class SelectionView: NSView, NSTextFieldDelegate {
                 selection = nil
             }
         case .drawing:
-            if let c = current, c.isMeaningful { annotations.append(c) }
+            if let c = current, c.isMeaningful { canvas.changeAnnotations { $0.append(c) } }
             current = nil
+        case .movingAnnotation:
+            if didDrag { mouseDragged(with: event) }
+            if let move = canvas.movingAnnotation {
+                canvas.movingAnnotation = nil
+                if annotations[move.index].points != move.preview.points {
+                    canvas.changeAnnotations { $0[move.index] = move.preview }
+                }
+            }
+            NSCursor.openHand.set()
         case .moving, .resizing:
             break
         }
@@ -688,7 +714,7 @@ final class SelectionView: NSView, NSTextFieldDelegate {
             showRecordBar()
             return
         }
-        guard let sel = selection, !isScrolling, sel.width >= 4 else { hideOwnBars(); return }
+        guard let sel = selection, !isScrolling, !canvas.hasPendingText, sel.width >= 4 else { hideOwnBars(); return }
         // 选区移到另一块屏幕时工具栏跟过来；把这块屏幕的窗口设为 key，按钮第一下点击就能响应
         if let w = window, !w.isKeyWindow, case .none = drag {
             w.makeKeyAndOrderFront(nil)
@@ -708,7 +734,7 @@ final class SelectionView: NSView, NSTextFieldDelegate {
         }
         pinButton?.isHidden = false
         toolbar?.setActiveTool(tool)
-        toolbar?.setUndoEnabled(!annotations.isEmpty)
+        toolbar?.setUndoEnabled(canvas.canUndo)
         if mode == .screenshot {
             if textBar == nil {
                 let bar = TextToolBarView(frame: .zero)
@@ -894,8 +920,8 @@ final class SelectionView: NSView, NSTextFieldDelegate {
     }
 
     func undo() {
-        guard !annotations.isEmpty else { return }
-        annotations.removeLast()
+        guard case .none = drag else { return }
+        canvas.undoAnnotationChange()
         showBars()
     }
 
@@ -951,11 +977,30 @@ final class SelectionView: NSView, NSTextFieldDelegate {
     var hasPendingText: Bool { textField != nil }
     func commitPendingText() { if textField != nil { commitText() } }
 
+    private func editorWidth(for text: String, font: NSFont) -> CGFloat {
+        let attributes: [NSAttributedString.Key: Any] = [.font: font]
+        let minimum = ("zhongwen" as NSString).size(withAttributes: attributes).width
+        let content = (text as NSString).size(withAttributes: attributes).width
+        return ceil(max(minimum, content)) + 6  // 两侧内边距和插入光标
+    }
+
     private func beginText(at p: CGPoint) {
         let size = AnnotationPalette.fontSizes[AppSettings.annotationSize]
         let font = NSFont.systemFont(ofSize: size, weight: .semibold)
         let h = ceil(font.ascender - font.descender + font.leading) + 4
-        let tf = NSTextField(frame: NSRect(x: p.x, y: p.y - h / 2, width: 60, height: h))
+        guard let sel = selection, let window else { return }
+        let area = sel.intersection(bounds)
+        let width = min(area.width, editorWidth(for: "", font: font))
+        let x = max(area.minX, min(p.x, area.maxX - width))
+        let y = max(area.minY, min(p.y - h / 2, area.maxY - h))
+        // 输入法组字时改变 NSTextField 自身的尺寸会干扰共享编辑器。只伸缩外层的可见区域。
+        let box = NSView(frame: NSRect(x: x, y: y, width: width, height: h))
+        box.wantsLayer = true
+        box.clipsToBounds = true
+        box.layer?.borderColor = NSColor(white: 1, alpha: 0.6).cgColor
+        box.layer?.borderWidth = 1
+        box.layer?.cornerRadius = 3
+        let tf = NSTextField(frame: NSRect(x: 0, y: 0, width: area.maxX - x, height: h))
         tf.font = font
         tf.textColor = AnnotationPalette.color(AppSettings.annotationColorIndex)
         tf.isBordered = false
@@ -965,32 +1010,48 @@ final class SelectionView: NSView, NSTextFieldDelegate {
         tf.cell?.wraps = false
         tf.cell?.isScrollable = true
         tf.delegate = self
-        tf.wantsLayer = true
-        tf.layer?.borderColor = NSColor(white: 1, alpha: 0.6).cgColor
-        tf.layer?.borderWidth = 1
-        tf.layer?.cornerRadius = 3
-        addSubview(tf)
-        window?.makeKeyAndOrderFront(nil)
-        window?.makeFirstResponder(tf)
         textField = tf
         hideBars()
+        box.addSubview(tf)
+        addSubview(box)
+        if !window.isKeyWindow { window.makeKeyAndOrderFront(nil) }
+        window.makeFirstResponder(tf)
+        if let storage = (tf.currentEditor() as? NSTextView)?.textStorage {
+            NotificationCenter.default.addObserver(self, selector: #selector(annotationTextChanged(_:)),
+                                                   name: NSTextStorage.didProcessEditingNotification, object: storage)
+        }
     }
 
-    func controlTextDidChange(_ obj: Notification) {
-        guard let tf = textField else { return }
-        let w = (tf.stringValue as NSString).size(withAttributes: [.font: tf.font!]).width + 24
-        let right = min(selection?.maxX ?? bounds.maxX, bounds.maxX)
-        tf.setFrameSize(NSSize(width: max(60, min(w, right - tf.frame.minX)), height: tf.frame.height))
+    @objc private func annotationTextChanged(_ notification: Notification) {
+        guard let storage = notification.object as? NSTextStorage,
+              storage.editedMask.contains(.editedCharacters), let field = textField else { return }
+        // 系统输入法直接修改 field editor 的暂存文字。等本次组字结束布局后再调整外框。
+        DispatchQueue.main.async { [weak self, weak field] in
+            guard let self, let field, self.textField === field,
+                  let editor = field.currentEditor(), let font = field.font, let box = field.superview else { return }
+            let width = min(field.frame.width, self.editorWidth(for: editor.string, font: font))
+            if width != box.frame.width {
+                box.setFrameSize(NSSize(width: width, height: box.frame.height))
+            }
+        }
+    }
+
+    private func removeTextField() {
+        NotificationCenter.default.removeObserver(self, name: NSTextStorage.didProcessEditingNotification, object: nil)
+        let field = textField
+        textField = nil
+        field?.superview?.removeFromSuperview()
     }
 
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
-        if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+        guard control === textField, !textView.hasMarkedText() else { return false }
+        if [#selector(NSResponder.insertNewline(_:)), #selector(NSResponder.insertTab(_:)),
+            #selector(NSResponder.insertBacktab(_:))].contains(commandSelector) {
             commitText()
             return true
         }
         if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
-            textField?.removeFromSuperview()
-            textField = nil
+            removeTextField()
             window?.makeFirstResponder(self)
             showBars()
             return true
@@ -1000,14 +1061,14 @@ final class SelectionView: NSView, NSTextFieldDelegate {
 
     private func commitText() {
         guard let tf = textField else { return }
-        textField = nil
         let font = tf.font ?? NSFont.systemFont(ofSize: 22)
         // NSTextField 文字左侧约 2pt 内边距；draw(at:) 的原点是文字框左下角
-        let origin = CGPoint(x: tf.frame.minX + 2, y: tf.frame.minY + 2)
+        let frame = convert(tf.bounds, from: tf)
+        let origin = CGPoint(x: frame.minX + 2, y: frame.minY + 2)
         let a = Annotation(tool: .text, color: tf.textColor ?? .red, width: 0, points: [origin],
-                           text: tf.stringValue, fontSize: font.pointSize)
-        tf.removeFromSuperview()
-        if a.isMeaningful { annotations.append(a) }
+                           text: tf.currentEditor()?.string ?? tf.stringValue, fontSize: font.pointSize)
+        removeTextField()
+        if a.isMeaningful { canvas.changeAnnotations { $0.append(a) } }
         window?.makeFirstResponder(self)
         showBars()
         needsDisplay = true
@@ -1049,7 +1110,7 @@ final class SelectionView: NSView, NSTextFieldDelegate {
         }
         ctx.interpolationQuality = .high
         ctx.setShouldAntialias(true)
-        for a in canvas.annotations {
+        for a in canvas.visibleAnnotations {
             if a.tool == .mosaic {
                 // 马赛克底图按屏生成，逐屏裁剪绘制
                 for v in parts {
