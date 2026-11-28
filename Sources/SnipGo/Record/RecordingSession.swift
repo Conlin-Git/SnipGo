@@ -2,25 +2,12 @@ import AppKit
 import AVFoundation
 import ScreenCaptureKit
 
-/// 屏幕与音频回调共用同一串行队列。首个完整视频帧用于对齐鼠标轨迹。
-private final class RecordingStreamOutput: NSObject, SCStreamOutput {
-    private(set) var firstFrameTime: Double?
-
-    func stream(_ stream: SCStream, didOutputSampleBuffer buffer: CMSampleBuffer, of type: SCStreamOutputType) {
-        guard type == .screen, firstFrameTime == nil,
-              let info = (CMSampleBufferGetSampleAttachmentsArray(buffer, createIfNecessary: false)
-                          as? [[SCStreamFrameInfo: Any]])?.first,
-              let status = info[.status] as? Int, status == SCFrameStatus.complete.rawValue else { return }
-        firstFrameTime = buffer.presentationTimeStamp.seconds
-    }
-}
-
 extension Notification.Name {
     static let recordingStateChanged = Notification.Name("SnipGo.recordingStateChanged")
 }
 
 @MainActor
-final class RecordingSession: NSObject, SCRecordingOutputDelegate, SCStreamDelegate {
+final class RecordingSession: NSObject, SCStreamDelegate {
     static private(set) var current: RecordingSession?
 
     static var isRecording: Bool { current != nil }
@@ -30,12 +17,13 @@ final class RecordingSession: NSObject, SCRecordingOutputDelegate, SCStreamDeleg
     private let outputURL: URL
     private var boundary: RecordingBoundary?
     private var stream: SCStream?
-    private var recordingOutput: SCRecordingOutput?
-    private let streamOutput = RecordingStreamOutput()
-    private var pointer: RecordingPointer?
-    private var captureStartTime: Double = 0
+    private let rawURL: URL
+    private var recorder: RecordingWriter?
+    private var mixAudio = false
+    private var streamEnded = false
+    private var stopError: Error?
+    private var stopTime: CMTime?
     private(set) var isSaving = false
-    private let outputQueue = DispatchQueue(label: "snipgo.record.samples")
     private var timer: Timer?
     private(set) var startDate: Date?
     private var stopping = false
@@ -50,10 +38,13 @@ final class RecordingSession: NSObject, SCRecordingOutputDelegate, SCStreamDeleg
                 try await session.begin()
             } catch {
                 guard current === session else { return }
-                session.teardown()
+                session.recorder?.cancel()
+                try? FileManager.default.removeItem(at: session.rawURL)
+                session.hideBoundary()
                 current = nil
                 NotificationCenter.default.post(name: .recordingStateChanged, object: nil)
-                if !session.stopping { CaptureCoordinator.showError("无法开始录制", error) }
+                if let reason = session.stopError { CaptureCoordinator.showError("无法开始录制", reason) }
+                else if !session.stopping { CaptureCoordinator.showError("无法开始录制", error) }
             }
         }
     }
@@ -66,6 +57,7 @@ final class RecordingSession: NSObject, SCRecordingOutputDelegate, SCStreamDeleg
         self.snapshot = snapshot
         self.rect = rect
         self.outputURL = ImageOutput.uniqueURL(ext: "mp4")
+        self.rawURL = outputURL.deletingLastPathComponent().appendingPathComponent(".snipgo-\(UUID().uuidString).mp4")
         super.init()
     }
 
@@ -87,24 +79,30 @@ final class RecordingSession: NSObject, SCRecordingOutputDelegate, SCStreamDeleg
             useMic = false
         }
 
-        guard !stopping else { finishUp(success: false); return }
+        guard !stopping else { complete(saved: false); return }
         let outline = RecordingBoundary(screen: snapshot.screen, localRect: rect)
         boundary = outline
         outline.orderFrontRegardless()
         let filter = try await outline.captureFilter(for: snapshot.display)
-        guard !stopping else { finishUp(success: false); return }
-        let scale = snapshot.screen.backingScaleFactor
+        guard !stopping else { complete(saved: false); return }
+        let scale = filter.pointPixelScale > 0 ? CGFloat(filter.pointPixelScale) : snapshot.screen.backingScaleFactor
+        let refresh = snapshot.screen.maximumFramesPerSecond
+        let fps = refresh > 0 ? min(60, refresh) : 60
         let cfg = SCStreamConfiguration()
         if !isFullScreen {
             cfg.sourceRect = ScreenSnapshotter.sourceRect(forLocal: rect, screenHeight: snapshot.screen.frame.height)
         }
-        cfg.width = max(2, Int((rect.width * scale).rounded()) & ~1)
-        cfg.height = max(2, Int((rect.height * scale).rounded()) & ~1)
-        cfg.minimumFrameInterval = CMTime(value: 1, timescale: 60)
+        let size = AppSettings.recordResolution.outputSize(for: CGSize(width: rect.width * scale, height: rect.height * scale))
+        cfg.width = Int(size.width)
+        cfg.height = Int(size.height)
+        cfg.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
+        var pointer: RecordingPointer?
         if AppSettings.recordShowClicks {
             let region = rect.offsetBy(dx: snapshot.screen.frame.minX, dy: snapshot.screen.frame.minY)
             pointer = RecordingPointer(region: region, showsHand: AppSettings.recordShowCursor)
         }
+        let color: RecordingColor = snapshot.screen.colorSpace?.cgColorSpace?.isWideGamutRGB == true ? .displayP3 : .rec709
+        cfg.colorSpaceName = color.name
         cfg.pixelFormat = kCVPixelFormatType_32BGRA
         cfg.showsCursor = pointer == nil && AppSettings.recordShowCursor
         cfg.showMouseClicks = false
@@ -117,25 +115,20 @@ final class RecordingSession: NSObject, SCRecordingOutputDelegate, SCStreamDeleg
         cfg.captureMicrophone = useMic
 
         let s = SCStream(filter: filter, configuration: cfg, delegate: self)
-        try s.addStreamOutput(streamOutput, type: .screen, sampleHandlerQueue: outputQueue)
-        if cfg.capturesAudio { try s.addStreamOutput(streamOutput, type: .audio, sampleHandlerQueue: outputQueue) }
-        if useMic { try s.addStreamOutput(streamOutput, type: .microphone, sampleHandlerQueue: outputQueue) }
-
-        let rc = SCRecordingOutputConfiguration()
-        rc.outputURL = outputURL
-        rc.outputFileType = .mp4
-        rc.videoCodecType = .h264
-        let output = SCRecordingOutput(configuration: rc, delegate: self)
-        try s.addRecordingOutput(output)
-        recordingOutput = output
+        let recorder = try RecordingWriter(url: rawURL, width: cfg.width, height: cfg.height, fps: fps, color: color,
+                                           pointer: pointer, systemAudio: cfg.capturesAudio, microphone: useMic) { [weak self] error in
+            Task { @MainActor in self?.requestStop(error: error) }
+        }
+        self.recorder = recorder
+        mixAudio = cfg.capturesAudio && useMic
+        try s.addStreamOutput(recorder, type: .screen, sampleHandlerQueue: recorder.queue)
+        if cfg.capturesAudio { try s.addStreamOutput(recorder, type: .audio, sampleHandlerQueue: recorder.queue) }
+        if useMic { try s.addStreamOutput(recorder, type: .microphone, sampleHandlerQueue: recorder.queue) }
         stream = s
-
-        captureStartTime = CMClockGetTime(CMClockGetHostTimeClock()).seconds
-        pointer?.start()
         try await s.startCapture()
         guard Self.current === self else { try? await s.stopCapture(); return }
         startDate = Date()
-        if stopping { stopStream(s); return }
+        if stopping { finishRecording(); return }
         timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.tick() }
         }
@@ -146,93 +139,76 @@ final class RecordingSession: NSObject, SCRecordingOutputDelegate, SCStreamDeleg
         NotificationCenter.default.post(name: .recordingStateChanged, object: nil)
     }
 
-    func stop() {
-        guard !stopping else { return }
+    func stop() { requestStop(error: nil) }
+
+    private func requestStop(error: Error?) {
+        guard Self.current === self, !isSaving else { return }
+        if let error { stopError = error }
+        if stopTime == nil { stopTime = CMClockGetTime(CMClockGetHostTimeClock()) }
         stopping = true
         timer?.invalidate()
         timer = nil
-        // 启动期间按停止，由 begin() 在下一个异步边界收尾。
-        guard startDate != nil, let s = stream else { return }
-        stopStream(s)
+        if startDate != nil { finishRecording() }
     }
 
-    private func stopStream(_ s: SCStream) {
-        Task { @MainActor in
+    private func finishRecording() {
+        guard !isSaving, let stream, let recorder else { return }
+        isSaving = true
+        tick()
+        let end = stopTime ?? CMClockGetTime(CMClockGetHostTimeClock())
+        Task {
+            if !streamEnded {
+                do { try await stream.stopCapture() } catch { stopError = stopError ?? error }
+            }
+            hideBoundary()
             do {
-                try await s.stopCapture()
+                try await recorder.finish(at: end)
             } catch {
-                // stopCapture 失败时仍尝试收尾
+                try? FileManager.default.removeItem(at: rawURL)
+                complete(saved: false)
+                CaptureCoordinator.showError("无法完成录屏", error)
+                return
             }
-            // recordingOutputDidFinishRecording 会回调；保险起见延迟兜底
-            try? await Task.sleep(nanoseconds: 3_000_000_000)
-            if Self.current === self { self.finishUp(success: FileManager.default.fileExists(atPath: self.outputURL.path)) }
+            var mixError: Error?
+            if mixAudio {
+                do { try await RecordingAudio.mixTracks(in: rawURL) } catch { mixError = error }
+            }
+            do {
+                try FileManager.default.moveItem(at: rawURL, to: outputURL)
+                complete(saved: true)
+                if let error = mixError { CaptureCoordinator.showError("混音失败，已保存独立音轨", error) }
+                else if let error = stopError { CaptureCoordinator.showError("录制中断，已保存收到的画面", error) }
+            } catch {
+                complete(saved: false)
+                CaptureCoordinator.showError("录屏已保留在 \(rawURL.path)", error)
+            }
         }
     }
 
-    private func finishUp(success: Bool) {
-        guard Self.current === self, !isSaving else { return }
-        teardown()
-        if success, let pointer {
-            isSaving = true
-            stopping = true
-            tick()
-            let firstFrame = outputQueue.sync { streamOutput.firstFrameTime } ?? captureStartTime
-            Task {
-                do {
-                    try await pointer.finishVideo(at: outputURL, firstFrameTime: firstFrame)
-                } catch {
-                    CaptureCoordinator.showError("鼠标效果导出失败，已保留原始录屏", error)
-                }
-                complete(success: true)
-            }
-        } else {
-            complete(success: success)
-        }
+    private func hideBoundary() {
+        boundary?.orderOut(nil)
+        boundary?.close()
+        boundary = nil
     }
 
-    private func complete(success: Bool) {
+    private func complete(saved: Bool) {
+        guard Self.current === self else { return }
+        hideBoundary()
+        timer?.invalidate()
+        stream = nil
+        recorder = nil
         Self.current = nil
         NotificationCenter.default.post(name: .recordingStateChanged, object: nil)
-        if success {
+        if saved {
             ImageOutput.playCaptureSound()
             NSWorkspace.shared.activateFileViewerSelecting([outputURL])
         }
     }
 
-    private func teardown() {
-        pointer?.stop()
-        boundary?.orderOut(nil)
-        boundary?.close()
-        boundary = nil
-        timer?.invalidate()
-        timer = nil
-        stream = nil
-        recordingOutput = nil
-    }
-
-    // MARK: - SCRecordingOutputDelegate
-
-    nonisolated func recordingOutputDidFinishRecording(_ recordingOutput: SCRecordingOutput) {
-        Task { @MainActor in self.finishUp(success: true) }
-    }
-
-    nonisolated func recordingOutput(_ recordingOutput: SCRecordingOutput, didFailWithError error: Error) {
-        Task { @MainActor in
-            let wasStopping = self.stopping
-            self.finishUp(success: false)
-            if !wasStopping { CaptureCoordinator.showError("录制失败", error) }
-        }
-    }
-
-    // MARK: - SCStreamDelegate
-
     nonisolated func stream(_ stream: SCStream, didStopWithError error: Error) {
         Task { @MainActor in
-            if !self.stopping {
-                self.stopping = true
-                self.finishUp(success: FileManager.default.fileExists(atPath: self.outputURL.path))
-                CaptureCoordinator.showError("录制已停止", error)
-            }
+            self.streamEnded = true
+            self.requestStop(error: error)
         }
     }
 }

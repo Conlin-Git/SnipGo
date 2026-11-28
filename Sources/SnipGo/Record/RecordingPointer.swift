@@ -1,96 +1,33 @@
 import AppKit
-import AVFoundation
 import CoreImage
 
-/// 只保存录制区域内指针的变化，使用与屏幕采样帧相同的主机时钟。
-@MainActor
+/// 在录制队列上采样鼠标；启动时在主线程准备 AppKit 的手型图片。
 final class RecordingPointer {
-    struct Sample {
-        let time: Double
-        let position: CGPoint?
-        let pressed: Bool
+    struct State: Equatable {
+        var position: CGPoint?
+        var pressed = false
     }
 
     private let region: CGRect
+    private let primaryHeight: CGFloat
     private let showsHand: Bool
-    private var timer: Timer?
-    private var samples: [Sample] = []
-    private var previousClickCount: UInt32 = 0
+    private var previousClickCount: UInt32
+    private let hand: CIImage
+    private let hotSpot: CGPoint
+    private let dot: CIImage
 
-    init(region: CGRect, showsHand: Bool) {
-        self.region = region
-        self.showsHand = showsHand
-    }
-
-    // 计数器也能捕获在两次采样之间已经松开的短点击。
-    private var clickCount: UInt32 {
+    private static var clickCount: UInt32 {
         [.leftMouseDown, .rightMouseDown, .otherMouseDown].reduce(0) {
             $0 &+ CGEventSource.counterForEventType(.combinedSessionState, eventType: $1)
         }
     }
 
-    func start() {
-        previousClickCount = clickCount
-        sample()
-        let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.sample() }
-        }
-        self.timer = timer
-        RunLoop.main.add(timer, forMode: .common)
-    }
-
-    func stop() {
-        timer?.invalidate()
-        timer = nil
-    }
-
-    private func sample() {
-        let mouse = NSEvent.mouseLocation
-        let count = clickCount
-        let pressed = NSEvent.pressedMouseButtons != 0 || count != previousClickCount
-        previousClickCount = count
-        let visible = region.contains(mouse) && (showsHand || pressed)
-        let position = visible ? CGPoint(x: mouse.x - region.minX, y: mouse.y - region.minY) : nil
-        let dot = visible && pressed
-        guard samples.last?.position != position || samples.last?.pressed != dot else { return }
-        samples.append(Sample(time: CMClockGetTime(CMClockGetHostTimeClock()).seconds,
-                              position: position, pressed: dot))
-    }
-
-    func finishVideo(at url: URL, firstFrameTime: Double) async throws {
-        guard samples.contains(where: { $0.position != nil }) else { return }
-        let asset = AVURLAsset(url: url)
-        let renderer = PointerRenderer(regionSize: region.size, samples: samples, firstFrameTime: firstFrameTime)
-        let composition = try await AVMutableVideoComposition.videoComposition(with: asset, applyingCIFiltersWithHandler: { request in
-            request.finish(with: renderer.frame(request.sourceImage, at: request.compositionTime.seconds), context: nil)
-        })
-        // 即使桌面静止，手型移动和短点击也按 60 fps 输出。
-        composition.sourceTrackIDForFrameTiming = kCMPersistentTrackID_Invalid
-        composition.frameDuration = CMTime(value: 1, timescale: 60)
-        guard let export = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetHighestQuality) else {
-            throw CocoaError(.featureUnsupported)
-        }
-        export.videoComposition = composition
-        let temp = url.deletingLastPathComponent().appendingPathComponent(".snipgo-\(UUID().uuidString).mp4")
-        defer { try? FileManager.default.removeItem(at: temp) }
-        try await export.export(to: temp, as: .mp4)
-        _ = try FileManager.default.replaceItemAt(url, withItemAt: temp)
-    }
-}
-
-struct PointerRenderer {
-    let regionSize: CGSize
-    let samples: [RecordingPointer.Sample]
-    let firstFrameTime: Double
-    private let hand: CIImage
-    private let hotSpot: CGPoint
-    private let dot: CIImage
-
     @MainActor
-    init(regionSize: CGSize, samples: [RecordingPointer.Sample], firstFrameTime: Double) {
-        self.regionSize = regionSize
-        self.samples = samples
-        self.firstFrameTime = firstFrameTime
+    init(region: CGRect, showsHand: Bool) {
+        self.region = region
+        self.showsHand = showsHand
+        primaryHeight = CGDisplayBounds(CGMainDisplayID()).height
+        previousClickCount = Self.clickCount
         let cursor = NSCursor.pointingHand
         let size = cursor.image.size
         hotSpot = CGPoint(x: cursor.hotSpot.x, y: size.height - cursor.hotSpot.y)
@@ -116,21 +53,23 @@ struct PointerRenderer {
         }
     }
 
-    func frame(_ source: CIImage, at seconds: Double) -> CIImage {
-        let time = firstFrameTime + seconds
-        var low = 0
-        var high = samples.count
-        while low < high {
-            let mid = low + (high - low) / 2
-            if samples[mid].time <= time { low = mid + 1 } else { high = mid }
-        }
-        guard low > 0, let point = samples[low - 1].position else { return source }
-        let pressed = samples[low - 1].pressed
-        let image = pressed ? dot : hand
-        let anchor = pressed ? CGPoint(x: dot.extent.midX, y: dot.extent.midY) : hotSpot
+    func sample() -> State {
+        let count = Self.clickCount
+        let pressed = count != previousClickCount || NSEvent.pressedMouseButtons != 0
+        previousClickCount = count
+        guard (showsHand || pressed), let location = CGEvent(source: nil)?.location else { return State() }
+        let mouse = CGPoint(x: location.x, y: primaryHeight - location.y)
+        guard region.contains(mouse) else { return State() }
+        return State(position: CGPoint(x: mouse.x - region.minX, y: mouse.y - region.minY), pressed: pressed)
+    }
+
+    func frame(_ source: CIImage, state: State) -> CIImage {
+        guard let point = state.position else { return source }
+        let image = state.pressed ? dot : hand
+        let anchor = state.pressed ? CGPoint(x: dot.extent.midX, y: dot.extent.midY) : hotSpot
         let bounds = source.extent
-        let sx = bounds.width / regionSize.width
-        let sy = bounds.height / regionSize.height
+        let sx = bounds.width / region.width
+        let sy = bounds.height / region.height
         let transform = CGAffineTransform(a: sx, b: 0, c: 0, d: sy,
                                           tx: bounds.minX + (point.x - anchor.x) * sx,
                                           ty: bounds.minY + (point.y - anchor.y) * sy)

@@ -4,6 +4,7 @@ import Carbon.HIToolbox
 enum SettingsKey {
     static let playSound = "playSound"
     static let imageFormat = "imageFormat"            // "png" | "jpg"
+    static let recordResolution = "recordResolution"
     static let recordSystemAudio = "recordSystemAudio"
     static let recordMicrophone = "recordMicrophone"
     static let recordShowCursor = "recordShowCursor"
@@ -25,6 +26,7 @@ enum AppSettings {
         defaults.register(defaults: [
             SettingsKey.playSound: true,
             SettingsKey.imageFormat: "png",
+            SettingsKey.recordResolution: RecordingResolution.original.rawValue,
             SettingsKey.recordSystemAudio: false,
             SettingsKey.recordMicrophone: false,
             SettingsKey.recordShowCursor: true,
@@ -43,6 +45,10 @@ enum AppSettings {
 
     static var playSound: Bool { defaults.bool(forKey: SettingsKey.playSound) }
     static var imageFormat: String { defaults.string(forKey: SettingsKey.imageFormat) ?? "png" }
+    static var recordResolution: RecordingResolution {
+        get { RecordingResolution(rawValue: defaults.string(forKey: SettingsKey.recordResolution) ?? "") ?? .original }
+        set { defaults.set(newValue.rawValue, forKey: SettingsKey.recordResolution) }
+    }
     static var recordSystemAudio: Bool {
         get { defaults.bool(forKey: SettingsKey.recordSystemAudio) }
         set { defaults.set(newValue, forKey: SettingsKey.recordSystemAudio) }

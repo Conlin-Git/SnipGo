@@ -5,6 +5,7 @@ import SwiftUI
 struct PreferencesView: View {
     @AppStorage(SettingsKey.playSound) private var playSound = true
     @AppStorage(SettingsKey.imageFormat) private var imageFormat = "png"
+    @AppStorage(SettingsKey.recordResolution) private var recordResolution = RecordingResolution.original
     @AppStorage(SettingsKey.recordSystemAudio) private var recordSystemAudio = false
     @AppStorage(SettingsKey.recordMicrophone) private var recordMicrophone = false
     @AppStorage(SettingsKey.recordShowCursor) private var recordShowCursor = true
@@ -54,7 +55,13 @@ struct PreferencesView: View {
                     Toggle("录制麦克风", isOn: $recordMicrophone)
                     Toggle("显示鼠标指针", isOn: $recordShowCursor)
                     Toggle("按下时显示实心圆", isOn: $recordShowClicks)
-                    Text("视频格式：mp4（H.264）").font(.callout).foregroundStyle(.secondary)
+                    Picker("输出分辨率", selection: $recordResolution) {
+                        ForEach(RecordingResolution.allCases, id: \.self) { resolution in
+                            Text(resolution.title).tag(resolution)
+                        }
+                    }
+                    .fixedSize()
+                    .help("按选区比例缩小，小选区保留原始尺寸")
                 }
             }
 

@@ -137,6 +137,15 @@ final class RecordControlBar: NSVisualEffectView {
             i.state = on ? .on : .off
             menu.addItem(i)
         }
+        menu.addItem(NSMenuItem.sectionHeader(title: "输出分辨率"))
+        for resolution in RecordingResolution.allCases {
+            let item = NSMenuItem(title: resolution.title, action: #selector(selectResolution(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = resolution.rawValue
+            item.state = AppSettings.recordResolution == resolution ? .on : .off
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
         menu.addItem(NSMenuItem.sectionHeader(title: "声音"))
         toggle("录制麦克风", AppSettings.recordMicrophone, #selector(toggleMic))
         toggle("录制系统声音", AppSettings.recordSystemAudio, #selector(toggleAudio))
@@ -150,6 +159,11 @@ final class RecordControlBar: NSVisualEffectView {
         path.isEnabled = false
         menu.addItem(path)
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: optionsButton.bounds.height + 4), in: optionsButton)
+    }
+
+    @objc private func selectResolution(_ item: NSMenuItem) {
+        guard let value = item.representedObject as? String, let resolution = RecordingResolution(rawValue: value) else { return }
+        AppSettings.recordResolution = resolution
     }
 
     @objc private func toggleMic() { AppSettings.recordMicrophone.toggle() }
