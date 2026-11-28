@@ -20,6 +20,7 @@ final class RecordingSession: NSObject, SCRecordingOutputDelegate, SCStreamDeleg
     private let snapshot: ScreenSnapshot
     private let rect: CGRect          // 屏幕本地坐标
     private let outputURL: URL
+    private var boundary: RecordingBoundary?
     private var stream: SCStream?
     private var recordingOutput: SCRecordingOutput?
     private let nullOutput = NullStreamOutput()
@@ -37,10 +38,11 @@ final class RecordingSession: NSObject, SCRecordingOutputDelegate, SCStreamDeleg
             do {
                 try await session.begin()
             } catch {
+                guard current === session else { return }
                 session.teardown()
                 current = nil
                 NotificationCenter.default.post(name: .recordingStateChanged, object: nil)
-                CaptureCoordinator.showError("无法开始录制", error)
+                if !session.stopping { CaptureCoordinator.showError("无法开始录制", error) }
             }
         }
     }
@@ -74,15 +76,17 @@ final class RecordingSession: NSObject, SCRecordingOutputDelegate, SCStreamDeleg
             useMic = false
         }
 
-        // QuickTime 风格：录制中不显示边框和浮窗，通过菜单栏停止按钮结束
-        // 录制中本应用没有遮挡窗口；钉图属于屏幕内容，一并录入
-        let filter = SCContentFilter(display: snapshot.display, excludingWindows: [])
+        guard !stopping else { finishUp(success: false); return }
+        let outline = RecordingBoundary(screen: snapshot.screen, localRect: rect)
+        boundary = outline
+        outline.orderFrontRegardless()
+        let filter = try await outline.captureFilter(for: snapshot.display)
+        guard !stopping else { finishUp(success: false); return }
         let scale = snapshot.screen.backingScaleFactor
         let cfg = SCStreamConfiguration()
         if !isFullScreen {
             cfg.sourceRect = ScreenSnapshotter.sourceRect(forLocal: rect, screenHeight: snapshot.screen.frame.height)
         }
-        // H.264 要求偶数尺寸
         cfg.width = max(2, Int((rect.width * scale).rounded()) & ~1)
         cfg.height = max(2, Int((rect.height * scale).rounded()) & ~1)
         cfg.minimumFrameInterval = CMTime(value: 1, timescale: 60)
@@ -110,7 +114,9 @@ final class RecordingSession: NSObject, SCRecordingOutputDelegate, SCStreamDeleg
         stream = s
 
         try await s.startCapture()
+        guard Self.current === self else { try? await s.stopCapture(); return }
         startDate = Date()
+        if stopping { stopStream(s); return }
         timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.tick() }
         }
@@ -126,11 +132,12 @@ final class RecordingSession: NSObject, SCRecordingOutputDelegate, SCStreamDeleg
         stopping = true
         timer?.invalidate()
         timer = nil
-        guard let s = stream else {
-            teardown()
-            finishUp(success: false)
-            return
-        }
+        // 启动期间按停止，由 begin() 在下一个异步边界收尾。
+        guard startDate != nil, let s = stream else { return }
+        stopStream(s)
+    }
+
+    private func stopStream(_ s: SCStream) {
         Task { @MainActor in
             do {
                 try await s.stopCapture()
@@ -155,6 +162,9 @@ final class RecordingSession: NSObject, SCRecordingOutputDelegate, SCStreamDeleg
     }
 
     private func teardown() {
+        boundary?.orderOut(nil)
+        boundary?.close()
+        boundary = nil
         timer?.invalidate()
         timer = nil
         stream = nil

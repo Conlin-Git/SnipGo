@@ -157,15 +157,14 @@ final class SelectionView: NSView, NSTextFieldDelegate {
         if let hole {
             ctx.saveGState()
             let isSelection = selection != nil
+            let outline = hole.insetBy(dx: -0.75, dy: -0.75)
             if mode == .record && isSelection {
-                ctx.setStrokeColor(NSColor.white.cgColor)
-                ctx.setLineDash(phase: 0, lengths: [6, 4])
+                RecordingBoundary.drawOutline(outline, in: ctx)
             } else {
-                ctx.setStrokeColor(NSColor.white.cgColor)   // 截图选区框 / 窗口悬停高亮：白色实线
+                ctx.setStrokeColor(NSColor.white.cgColor)
+                ctx.setLineWidth(isSelection ? 1.5 : 2.5)
+                ctx.stroke(outline)
             }
-            ctx.setLineWidth(isSelection ? 1.5 : 2.5)
-            // 边框画在选区外侧，避免进入截图 / 录制区域
-            ctx.stroke(hole.insetBy(dx: -0.75, dy: -0.75))
             ctx.restoreGState()
         }
 
