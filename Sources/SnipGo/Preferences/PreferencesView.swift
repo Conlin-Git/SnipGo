@@ -60,6 +60,10 @@ struct PreferencesView: View {
                 ShortcutRecorderView(action: .capture).frame(width: 200, height: 28)
             }
 
+            row("最近截图快捷键:") {
+                ShortcutRecorderView(action: .recent).frame(width: 200, height: 28)
+            }
+
             row("录屏快捷键:") {
                 VStack(alignment: .leading, spacing: 6) {
                     ShortcutRecorderView(action: .record).frame(width: 200, height: 28)

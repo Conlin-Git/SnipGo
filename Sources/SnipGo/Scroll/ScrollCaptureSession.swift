@@ -16,7 +16,9 @@ final class ScrollFrameProcessor: NSObject, SCStreamOutput, SCStreamDelegate, @u
     let queue = DispatchQueue(label: "snipgo.scroll", qos: .userInitiated)
     var previewScale: CGFloat = 0.25
     /// 主线程回调：总高度、预览图（可能为空）、本帧结果
-    var onUpdate: ((Int, CGImage?, ScrollStitcher.Result) -> Void)?
+    var onResult: ((ScrollStitcher.Result) -> Void)?
+    var onPreview: ((Int, Int, CGImage) -> Void)?
+    private var previewPending = false
     var onError: ((Error) -> Void)?
 
     private let ciContext = CIContext(options: [.cacheIntermediates: false])
@@ -37,19 +39,27 @@ final class ScrollFrameProcessor: NSObject, SCStreamOutput, SCStreamDelegate, @u
             return ctx.createCGImage(CIImage(cvPixelBuffer: buf), from: rect)
         }
         let result = stitcher.process(frame)
-        var preview: CGImage?
-        let now = Date()
+        DispatchQueue.main.async { [weak self] in self?.onResult?(result) }
         switch result {
         case .first, .appended, .limitReached:
-            if now.timeIntervalSince(lastPreview) > 0.2 || result == .first {
-                preview = stitcher.compose(scale: previewScale)
-                lastPreview = now
-            }
-        default:
-            break
+            guard !previewPending, stitcher.totalHeight != publishedHeight else { return }
+            let delay = max(0, 0.2 - Date().timeIntervalSince(lastPreview))
+            if delay == 0 { publishPreview(); return }
+            previewPending = true
+            queue.asyncAfter(deadline: .now() + delay) { [weak self] in self?.publishPreview() }
+        default: break
         }
+    }
+
+    private var publishedHeight = 0
+    private func publishPreview() {
+        previewPending = false
+        guard !stopped, let image = stitcher.compose(scale: previewScale) else { return }
+        lastPreview = Date()
         let total = stitcher.totalHeight
-        DispatchQueue.main.async { [weak self] in self?.onUpdate?(total, preview, result) }
+        publishedHeight = total
+        let footer = stitcher.fixedBottom
+        DispatchQueue.main.async { [weak self] in self?.onPreview?(total, footer, image) }
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
@@ -78,6 +88,10 @@ final class ScrollCaptureSession {
 
     private var hud: FloatingPanel?
     private var previewPanel: FloatingPanel?
+    private var missedFrames = 0
+    private var displayedHeight = 0
+    private var hintPanel: FloatingPanel?
+    private let edge = CALayer()
     private let previewView = NSImageView()
 
     init(snapshot: ScreenSnapshot, selection: CGRect) {
@@ -94,7 +108,8 @@ final class ScrollCaptureSession {
         buildPreview()
         let scale = snapshot.screen.backingScaleFactor
         processor.previewScale = min(1, (220 * scale) / (selection.width * scale)) // 预览最宽 220pt
-        processor.onUpdate = { [weak self] total, preview, result in self?.update(total: total, preview: preview, result: result) }
+        processor.onResult = { [weak self] result in self?.updateStatus(result) }
+        processor.onPreview = { [weak self] total, footer, image in self?.updatePreview(total: total, footer: footer, preview: image) }
         processor.onError = { [weak self] error in
             guard let self, !self.finished else { return }
             CaptureCoordinator.showError("长截图中断", error)
@@ -134,10 +149,55 @@ final class ScrollCaptureSession {
         stream = s
     }
 
-    private func update(total: Int, preview: CGImage?, result: ScrollStitcher.Result) {
-        guard !finished, let preview else { return }
+    private func updateStatus(_ result: ScrollStitcher.Result) {
+        guard !finished else { return }
+        if result == .rejected {
+            missedFrames += 1
+            if missedFrames == 4 { showRecoveryHint() }
+        } else {
+            missedFrames = 0
+            hintPanel?.orderOut(nil)
+        }
+    }
+
+    private func updatePreview(total: Int, footer: Int, preview: CGImage) {
+        guard !finished else { return }
+        let previous = displayedHeight
+        displayedHeight = total
         previewView.image = NSImage(cgImage: preview, size: NSSize(width: preview.width, height: preview.height))
         layoutPreview(imageSize: NSSize(width: preview.width, height: preview.height))
+        guard previous > 0, total > previous, let layer = previewView.layer else { return }
+        let y = layer.bounds.height * CGFloat(total - previous + footer) / CGFloat(total)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        edge.frame = CGRect(x: 0, y: min(y, layer.bounds.height - 2), width: layer.bounds.width, height: 2)
+        CATransaction.commit()
+        let flash = CABasicAnimation(keyPath: "opacity")
+        flash.fromValue = 1
+        flash.toValue = 0
+        flash.duration = 0.45
+        edge.add(flash, forKey: "newRows")
+    }
+
+    private func showRecoveryHint() {
+        let label = NSTextField(labelWithString: "请稍向上回滚，回到上一段内容")
+        label.sizeToFit()
+        let frame = previewPanel?.frame ?? globalSelection
+        let screen = snapshot.screen.visibleFrame
+        let width = label.frame.width + 20, height = label.frame.height + 12
+        let x = min(max(frame.minX, screen.minX + 4), screen.maxX - width - 4)
+        let y = max(screen.minY + 4, min(frame.minY - height - 4, screen.maxY - height - 4))
+        let rect = CGRect(x: x, y: y, width: width, height: height)
+        let panel = hintPanel ?? FloatingPanel(rect: rect)
+        panel.setFrame(rect, display: false)
+        panel.ignoresMouseEvents = true
+        panel.backgroundColor = .windowBackgroundColor
+        let container = NSView(frame: CGRect(origin: .zero, size: rect.size))
+        label.setFrameOrigin(CGPoint(x: 10, y: 6))
+        container.addSubview(label)
+        panel.contentView = container
+        panel.orderFrontRegardless()
+        hintPanel = panel
     }
 
     func finish(_ action: ScrollFinishAction) {
@@ -208,6 +268,10 @@ final class ScrollCaptureSession {
         previewView.layer?.borderColor = NSColor(white: 0, alpha: 0.15).cgColor
         previewView.layer?.borderWidth = 0.5
         previewView.autoresizingMask = [.width, .height]
+        panel.ignoresMouseEvents = true
+        edge.backgroundColor = NSColor.systemGreen.cgColor
+        edge.opacity = 0
+        previewView.layer?.addSublayer(edge)
         panel.contentView = previewView
         previewPanel = panel
     }
@@ -230,6 +294,8 @@ final class ScrollCaptureSession {
     }
 
     private func closePanels() {
+        hintPanel?.close()
+        hintPanel = nil
         hud?.orderOut(nil)
         hud?.close()
         hud = nil

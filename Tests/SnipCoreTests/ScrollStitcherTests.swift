@@ -111,6 +111,28 @@ final class ScrollStitcherTests: XCTestCase {
         XCTAssertEqual(preview.width, W / 4)
     }
 
+    func testPreviewHasNoSeamsBetweenThinStrips() throws {
+        let content = makeContent(height: 1000, seed: 7)
+        let stitcher = ScrollStitcher()
+        let frameHeight = 360
+        var offset = 0
+        stitcher.process(CGImageFrame(image(rows(content, offset, frameHeight), height: frameHeight)))
+        for step in [3, 7, 13, 4, 1, 8, 19, 2, 12, 5, 11, 23, 1] {
+            offset += step
+            XCTAssertEqual(stitcher.process(CGImageFrame(image(rows(content, offset, frameHeight), height: frameHeight))), .appended(step))
+        }
+        // 源图有不透明的白边，缩小后每一行仍应完全覆盖。
+        for scale in [0.17, 0.253, 0.55] {
+            let preview = try XCTUnwrap(stitcher.compose(scale: scale))
+            let data = pixels(preview)
+            let gaps = (0..<preview.height).filter { row in
+                let index = (row * preview.width + 1) * 4
+                return data[index + 3] != 255
+            }
+            XCTAssertTrue(gaps.isEmpty, "scale=\(scale), uncovered rows=\(gaps)")
+        }
+    }
+
     func testStitchPlainContent() throws {
         let contentH = 2400, frameH = 360
         let content = makeContent(height: contentH, seed: 7)

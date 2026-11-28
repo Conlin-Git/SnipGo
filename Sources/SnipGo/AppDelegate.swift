@@ -50,6 +50,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
            !center.register(id: 2, shortcut: s, handler: { [weak self] in self?.toggleRecording() }) {
             failed.append("录屏 \(s.displayString)")
         }
+        if let shortcut = HotKeyAction.recent.shortcut,
+           !center.register(id: 3, shortcut: shortcut, handler: { [weak self] in self?.showRecent() }) {
+            failed.append("最近截图 \(shortcut.displayString)")
+        }
         if !failed.isEmpty {
             NSLog("SnipGo: 快捷键注册失败（可能被占用）: \(failed.joined(separator: ", "))")
         }
@@ -78,6 +82,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else {
             CaptureCoordinator.shared.start(mode: .record)
         }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) { RecentCaptures.shared.clear() }
+
+    @objc private func showRecent() {
+        guard !CaptureCoordinator.shared.isActive else { return }
+        RecentCaptures.shared.show()
     }
 
     @objc func openSaveFolder() {
@@ -159,6 +170,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(tip)
 
         menu.addItem(.separator())
+        let recent = menu.addItem(withTitle: "最近截图…", action: #selector(showRecent), keyEquivalent: "")
+        recent.target = self
+        applyShortcut(.recent, to: recent)
         let folder = NSMenuItem(title: "打开保存目录", action: #selector(openSaveFolder), keyEquivalent: "")
         folder.target = self
         menu.addItem(folder)

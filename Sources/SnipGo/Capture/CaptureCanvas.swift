@@ -12,7 +12,12 @@ final class CaptureCanvas {
     var selection: CGRect? { didSet { if oldValue != selection { redraw() } } }
     var hoverRect: CGRect? { didSet { if oldValue != hoverRect { redraw() } } }
     var tool: AnnotationTool? { didSet { redraw() } }
-    var annotations: [Annotation] = [] { didSet { redraw() } }
+    var annotations: [Annotation] = [] {
+        didSet {
+            views.forEach { $0.closeTextCard() }
+            redraw()
+        }
+    }
     var current: Annotation? { didSet { redraw() } }
 
     /// 正在新建 / 调整选区（此时也显示取色放大镜）
@@ -41,6 +46,8 @@ final class CaptureCanvas {
     }
 
     func add(_ view: SelectionView) { views.append(view) }
+
+    func detachViews() { views.removeAll() }
 
     func redraw() { views.forEach { $0.needsDisplay = true } }
 

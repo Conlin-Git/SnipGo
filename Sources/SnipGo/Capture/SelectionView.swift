@@ -381,7 +381,30 @@ final class SelectionView: NSView, NSTextFieldDelegate {
     }
 
     override func rightMouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        if tool == .step, let index = stepIndex(at: point) {
+            canvas.commitPendingText()
+            let menu = NSMenu()
+            let remove = menu.addItem(withTitle: "删除步骤 \(annotations[index].number)", action: #selector(removeStep(_:)), keyEquivalent: "")
+            remove.target = self
+            remove.tag = index
+            NSMenu.popUpContextMenu(menu, with: event, for: self)
+            return
+        }
         delegate?.selectionView(self, perform: .cancel)
+    }
+
+    @objc private func removeStep(_ sender: NSMenuItem) {
+        var updated = annotations
+        guard updated.indices.contains(sender.tag), updated[sender.tag].tool == .step else { return }
+        updated.remove(at: sender.tag)
+        var next = 1
+        for index in updated.indices where updated[index].tool == .step {
+            updated[index].number = next
+            next += 1
+        }
+        annotations = updated
+        showBars()
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -405,6 +428,10 @@ final class SelectionView: NSView, NSTextFieldDelegate {
                 return
             }
             if let tool, sel.contains(p) {
+                if tool == .step {
+                    placeStep(at: p)
+                    return
+                }
                 if tool == .text {
                     beginText(at: p)
                     return
@@ -445,6 +472,22 @@ final class SelectionView: NSView, NSTextFieldDelegate {
         guard delegate?.selectionViewShouldBegin(self) ?? true else { return }
         drag = .creating(start: p)
         canvas.isAdjusting = true
+    }
+
+    private func stepIndex(at point: CGPoint) -> Int? {
+        annotations.lastIndex {
+            guard $0.tool == .step, let center = $0.points.first else { return false }
+            return hypot(center.x - point.x, center.y - point.y) <= $0.stepDiameter / 2
+        }
+    }
+
+    private func placeStep(at point: CGPoint) {
+        guard stepIndex(at: point) == nil else { return }
+        let number = annotations.filter { $0.tool == .step }.count + 1
+        let font = [CGFloat(18), 22, 26][AppSettings.annotationSize]
+        annotations.append(Annotation(tool: .step, color: AnnotationPalette.color(AppSettings.annotationColorIndex),
+                                      width: 1, points: [point], fontSize: font, number: number))
+        showBars()
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -493,6 +536,11 @@ final class SelectionView: NSView, NSTextFieldDelegate {
     }
 
     override func mouseUp(with event: NSEvent) {
+        let revealTools: Bool
+        switch drag {
+        case .creating, .moving, .resizing: revealTools = true
+        default: revealTools = false
+        }
         switch drag {
         case .none:
             return
@@ -515,6 +563,23 @@ final class SelectionView: NSView, NSTextFieldDelegate {
         if let s = selection { selection = snapped(s) }
         needsDisplay = true
         showBars()
+        if revealTools, mode == .screenshot, let owner = canvas.barOwner {
+            // 只动画呈现层。按钮与回车路径从第一帧就处于最终位置。
+            for bar in [owner.toolbar as NSView?, owner.textBar, owner.styleBar].compactMap({ $0 }) where !bar.isHidden {
+                let fade = CABasicAnimation(keyPath: "opacity")
+                fade.fromValue = 0.15
+                fade.toValue = 1
+                fade.duration = 0.12
+                bar.layer?.add(fade, forKey: "selectionFade")
+                if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+                    let slide = CABasicAnimation(keyPath: "transform.translation.y")
+                    slide.fromValue = bar.frame.midY < (selection?.midY ?? 0) ? 3 : -3
+                    slide.toValue = 0
+                    slide.duration = 0.12
+                    bar.layer?.add(slide, forKey: "selectionSlide")
+                }
+            }
+        }
         window?.invalidateCursorRects(for: self)
     }
 

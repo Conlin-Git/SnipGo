@@ -1,8 +1,9 @@
 import AppKit
 import CoreImage
+import CoreText
 
 enum AnnotationTool: Int, CaseIterable {
-    case rect, ellipse, line, arrow, pen, mosaic, text
+    case rect, ellipse, line, arrow, pen, mosaic, text, step
 
     var symbol: String {
         switch self {
@@ -12,6 +13,7 @@ enum AnnotationTool: Int, CaseIterable {
         case .arrow: return "arrow.up.left"
         case .pen: return "pencil"
         case .mosaic: return "squareshape.split.3x3"
+        case .step: return "1.circle"
         case .text: return "textformat"
         }
     }
@@ -24,6 +26,7 @@ enum AnnotationTool: Int, CaseIterable {
         case .arrow: return "箭头"
         case .pen: return "画笔"
         case .mosaic: return "马赛克"
+        case .step: return "步骤编号"
         case .text: return "文字"
         }
     }
@@ -39,9 +42,18 @@ struct Annotation {
     var points: [CGPoint]
     var text: String = ""
     var fontSize: CGFloat = 22
+    var number = 0
+
+    var stepDiameter: CGFloat {
+        let width = (String(number) as NSString).size(withAttributes: [.font: stepFont]).width
+        return ceil(max(fontSize * 1.55, width + 9))
+    }
+
+    var stepFont: NSFont { .monospacedDigitSystemFont(ofSize: fontSize, weight: .heavy) }
 
     var isMeaningful: Bool {
         switch tool {
+        case .step: return !points.isEmpty
         case .pen, .mosaic: return points.count > 1
         case .text: return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         default:
@@ -91,6 +103,8 @@ enum AnnotationRenderer {
             ctx.clip()
             ctx.interpolationQuality = .none
             ctx.draw(mosaic, in: imageRect)
+        case .step:
+            drawStep(a, at: p0, in: ctx)
         case .text:
             let ns = NSGraphicsContext(cgContext: ctx, flipped: false)
             NSGraphicsContext.saveGraphicsState()
@@ -99,6 +113,28 @@ enum AnnotationRenderer {
                 .draw(at: p0)
             NSGraphicsContext.restoreGraphicsState()
         }
+    }
+
+    private static func drawStep(_ a: Annotation, at point: CGPoint, in ctx: CGContext) {
+        let diameter = a.stepDiameter
+        let bounds = CGRect(x: point.x - diameter / 2, y: point.y - diameter / 2,
+                            width: diameter, height: diameter)
+        ctx.setFillColor(NSColor(white: 0, alpha: 0.62).cgColor)
+        ctx.fillEllipse(in: bounds)
+        let isRed = a.color == AnnotationPalette.colors[0]
+        let fill = isRed ? NSColor(srgbRed: 0.79, green: 0.12, blue: 0.16, alpha: 1) : a.color
+        ctx.setFillColor(fill.cgColor)
+        ctx.fillEllipse(in: bounds.insetBy(dx: 0.75, dy: 0.75))
+
+        let brightness = fill.usingColorSpace(.genericGray)?.whiteComponent ?? 0
+        let ink: NSColor = isRed || brightness < 0.58 ? .white : .black
+        let label = NSAttributedString(string: String(a.number), attributes: [.font: a.stepFont, .foregroundColor: ink])
+        let line = CTLineCreateWithAttributedString(label)
+        // Center the actual numeral outline, which excludes ascender and descender padding.
+        let glyphs = CTLineGetBoundsWithOptions(line, .useGlyphPathBounds)
+        ctx.textMatrix = .identity
+        ctx.textPosition = CGPoint(x: point.x - glyphs.midX, y: point.y - glyphs.midY)
+        CTLineDraw(line, ctx)
     }
 
     static func rect(_ a: CGPoint, _ b: CGPoint) -> CGRect {

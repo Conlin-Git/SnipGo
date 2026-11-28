@@ -126,13 +126,16 @@ public final class ScrollStitcher: @unchecked Sendable {
                          bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
         else { return nil }
         ctx.interpolationQuality = scale < 1 ? .medium : .none
-        ctx.scaleBy(x: scale, y: scale)
 
-        var y = 0 // 从顶部往下累计
+        // 从顶部累计源图行数，共享取整后的目标边界，避免相邻条带各自覆盖半个像素。
+        var sourceEnd = 0
+        var targetEnd = 0
         func draw(_ img: CGImage) {
-            let h = img.height
-            ctx.draw(img, in: CGRect(x: 0, y: total - y - h, width: frameWidth, height: h))
-            y += h
+            sourceEnd += img.height
+            let start = targetEnd
+            targetEnd = (sourceEnd * outH + total / 2) / total
+            guard targetEnd > start else { return }
+            ctx.draw(img, in: CGRect(x: 0, y: outH - targetEnd, width: outW, height: targetEnd - start))
         }
         if stripRows == 0 {
             draw(head)
